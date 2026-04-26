@@ -7,7 +7,7 @@ Deep learning system to identify which Nintendo Mario game a screenshot, audio c
 ## Quick Start (Google Colab)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/mario-identifier
+git clone https://github.com/rboro11/ItsaMe-Mario-Identifier-
 cd mario-identifier
 pip install -r requirements.txt
 ```
