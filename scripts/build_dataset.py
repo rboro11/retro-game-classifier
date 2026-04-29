@@ -217,13 +217,17 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
                             "modality": "image"})
 
     # Audio
-    for class_dir in sorted(AUDIO_DIR.iterdir()):
-        if not class_dir.is_dir():
-            continue
-        wavs = list(class_dir.glob("*.wav"))
-        for f in wavs:
-            records.append({"filepath": str(f), "label": class_dir.name,
-                            "modality": "audio"})
+    if AUDIO_DIR.exists():
+        for class_dir in sorted(AUDIO_DIR.iterdir()):
+            if not class_dir.is_dir():
+                continue
+            wavs = list(class_dir.glob("*.wav"))
+            for f in wavs:
+                records.append({
+                    "filepath": str(f),
+                    "label": class_dir.name,
+                    "modality": "audio"
+                })
 
     if not records:
         print("No processed data found. Run --mode frames or --mode audio first.")
