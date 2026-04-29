@@ -51,14 +51,14 @@ def extract_frames(fps: float = 1.0):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # Direct images → copy
-        for img_file in class_dir.glob("*"):
+        for img_file in class_dir.rglob("*"):
             if img_file.suffix.lower() in IMG_EXTS:
                 dest = out_dir / img_file.name
                 if not dest.exists():
                     shutil.copy2(img_file, dest)
 
         # Videos → ffmpeg frame extraction
-        for vid_file in class_dir.glob("*"):
+        for vid_file in class_dir.rglob("*")
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
             stem   = vid_file.stem
