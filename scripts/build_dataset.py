@@ -58,7 +58,7 @@ def extract_frames(fps: float = 1.0):
                     shutil.copy2(img_file, dest)
 
         # Videos → ffmpeg frame extraction
-        for vid_file in class_dir.rglob("*")
+        for vid_file in class_dir.rglob("*"):
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
             stem   = vid_file.stem
@@ -105,7 +105,7 @@ def extract_audio(clip_duration: float = 10.0):
                     subprocess.run(cmd, check=True)
 
         # Videos → extract audio in chunks
-        for vid_file in class_dir.glob("*"):
+        for vid_file in class_dir.rglob("*"):
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
             # Get duration
