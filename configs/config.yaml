@@ -1,0 +1,58 @@
+# Mario Game Identifier — Default Config
+# Override any of these via CLI args in train_model.py
+
+data:
+  frames_dir:       data/processed/frames
+  audio_dir:        data/processed/audio
+  splits_dir:       data/processed/splits
+  img_size_default: 224     # used by resnet18, efficientnet_b0
+  img_size_nes:     64      # lighter option for NES-era frames
+  img_size_effb3:   300     # EfficientNet-B3 native size
+
+training:
+  default_lr:        0.001
+  default_epochs:    30
+  batch_size:        32
+  weight_decay:      0.0001
+  label_smoothing:   0.1
+  patience:          7
+  scheduler:         cosine   # cosine | plateau | none
+  amp:               true     # mixed precision (auto-disabled on CPU)
+
+checkpoints:
+  save_dir: checkpoints
+
+reports:
+  save_dir: reports
+
+# Phase recommendations
+phases:
+  phase1:
+    model: cnn_small
+    img_size: 64
+    epochs: 20
+    freeze: false
+    note: "Binary NES classifier. Fastest to train."
+  phase2:
+    models: [cnn_small, resnet18, efficientnet_b0]
+    img_size: 224
+    epochs: 30
+    freeze: true
+    note: "Multi-class NES (3-5 games). Freeze backbone first, then unfreeze."
+  phase3:
+    models: [resnet50, efficientnet_b3, vit_b16]
+    img_size: 300
+    epochs: 40
+    freeze: false
+    note: "Multi-era (10-20 games). Full fine-tune."
+  phase4:
+    model: audio_cnn
+    modality: audio
+    epochs: 30
+    note: "Audio spectrogram classifier from NES-MDB dataset."
+  phase5:
+    model: cnn_lstm
+    modality: video
+    num_frames: 8
+    epochs: 25
+    note: "Temporal model for short video clips."
