@@ -145,7 +145,7 @@ def extract_audio(clip_duration: float = 10.0):
 
 def generate_spectrograms():
     """
-    Pre-compute mel-spectrograms as PNG images so MarioAudioDataset
+    Pre-compute mel-spectrograms as PNG images so the audio dataset class
     can work without on-the-fly computation.
     Requires: librosa, PIL
     """
@@ -163,6 +163,10 @@ def generate_spectrograms():
     import matplotlib.pyplot as plt
 
     print("\n[generate_spectrograms]")
+    if not AUDIO_DIR.exists():
+        print("  No audio directory found. Run --mode audio first.")
+        return
+
     for class_dir in sorted(AUDIO_DIR.iterdir()):
         if not class_dir.is_dir():
             continue
@@ -208,15 +212,16 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
     records = []
 
     # Image frames
-    for class_dir in sorted(FRAMES_DIR.iterdir()):
-        if not class_dir.is_dir():
-            continue
-        imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
-        for f in imgs:
-            records.append({"filepath": str(f), "label": class_dir.name,
-                            "modality": "image"})
+    if FRAMES_DIR.exists():
+        for class_dir in sorted(FRAMES_DIR.iterdir()):
+            if not class_dir.is_dir():
+                continue
+            imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
+            for f in imgs:
+                records.append({"filepath": str(f), "label": class_dir.name,
+                                "modality": "image"})
 
-    # Audio
+    # Audio (only if processed audio directory exists)
     if AUDIO_DIR.exists():
         for class_dir in sorted(AUDIO_DIR.iterdir()):
             if not class_dir.is_dir():
@@ -272,7 +277,7 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Mario Identifier Dataset Builder")
+    parser = argparse.ArgumentParser(description="Retro Game Classifier — Dataset Builder")
     parser.add_argument("--mode", choices=["frames", "audio", "spectrograms",
                                            "splits", "all"], default="all")
     parser.add_argument("--fps",  type=float, default=1.0,
@@ -284,10 +289,10 @@ def main():
     args = parser.parse_args()
 
     mode = args.mode
-    if mode in ("frames",  "all"): extract_frames(fps=args.fps)
-    if mode in ("audio",   "all"): extract_audio(clip_duration=args.clip_duration)
+    if mode in ("frames",       "all"): extract_frames(fps=args.fps)
+    if mode in ("audio",        "all"): extract_audio(clip_duration=args.clip_duration)
     if mode in ("spectrograms", "all"): generate_spectrograms()
-    if mode in ("splits",  "all"): build_splits(args.val_ratio, args.test_ratio)
+    if mode in ("splits",       "all"): build_splits(args.val_ratio, args.test_ratio)
 
 
 if __name__ == "__main__":
