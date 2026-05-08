@@ -34,6 +34,33 @@ AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
 
 
 # ─────────────────────────────────────────────
+# GPU detection helper
+# ─────────────────────────────────────────────
+
+def _gpu_available() -> bool:
+    """Return True if a CUDA-capable GPU is visible to PyTorch."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def _ffmpeg_hwaccel_args() -> list:
+    """
+    Return hardware-acceleration prefix args for ffmpeg if a GPU is available.
+    '-hwaccel auto' lets ffmpeg pick the best decoder (CUDA/NVDEC on NVIDIA,
+    VAAPI on Linux/Intel, VideoToolbox on macOS).  Falls back to CPU silently
+    if the codec or platform doesn't support it.
+    """
+    if _gpu_available():
+        print("  [GPU detected] Using -hwaccel auto for frame extraction.")
+        return ["-hwaccel", "auto"]
+    print("  [No GPU] Using CPU for frame extraction.")
+    return []
+
+
+# ─────────────────────────────────────────────
 # Frame extraction (ffmpeg)
 # ─────────────────────────────────────────────
 
@@ -42,15 +69,20 @@ def extract_frames(fps: float = 1.0):
     For each class, extract frames from any MP4/video at <fps> fps.
     Also copies any raw images directly.
     Output: data/processed/frames/<ClassName>/<file>_f<N>.png
+
+    GPU acceleration is used automatically when a CUDA GPU is available
+    via '-hwaccel auto' prepended to the ffmpeg command.
     """
     print(f"\n[extract_frames] FPS = {fps}")
+    hw_args = _ffmpeg_hwaccel_args()
+
     for class_dir in sorted(RAW_DIR.iterdir()):
         if not class_dir.is_dir():
             continue
         out_dir = FRAMES_DIR / class_dir.name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Direct images → copy
+        # Direct images → copy (skip if already copied)
         for img_file in class_dir.rglob("*"):
             if img_file.suffix.lower() in IMG_EXTS:
                 dest = out_dir / img_file.name
@@ -61,17 +93,54 @@ def extract_frames(fps: float = 1.0):
         for vid_file in class_dir.rglob("*"):
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
-            stem   = vid_file.stem
+
+            stem = vid_file.stem
             output = str(out_dir / f"{stem}_f%05d.png")
-            cmd = [
-                "ffmpeg", "-y", "-i", str(vid_file),
-                "-vf", f"fps={fps}",
-                "-q:v", "2",
-                output,
-                "-loglevel", "error",
-            ]
+
+            # Skip if frames were already extracted for this video
+            existing = list(out_dir.glob(f"{stem}_f*.png"))
+            if existing:
+                print(f"  Skipping {vid_file.name} ({len(existing)} frames already exist)")
+                continue
+
+            # hwaccel args go BEFORE -i; other args after
+            cmd = (
+                ["ffmpeg", "-y"]
+                + hw_args
+                + [
+                    "-i", str(vid_file),
+                    "-vf", f"fps={fps}",
+                    "-q:v", "2",
+                    output,
+                    "-hide_banner",
+                    "-loglevel", "error",
+                ]
+            )
+
             print(f"  Extracting {vid_file.name} → {out_dir.name}/")
-            subprocess.run(cmd, check=True)
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                # If hwaccel caused a failure, retry without it
+                if hw_args:
+                    print(f"  Warning: hwaccel failed for {vid_file.name}, retrying on CPU...")
+                    cmd_cpu = (
+                        ["ffmpeg", "-y"]
+                        + [
+                            "-i", str(vid_file),
+                            "-vf", f"fps={fps}",
+                            "-q:v", "2",
+                            output,
+                            "-hide_banner",
+                            "-loglevel", "error",
+                        ]
+                    )
+                    try:
+                        subprocess.run(cmd_cpu, check=True)
+                    except subprocess.CalledProcessError as e2:
+                        print(f"  ERROR: Could not extract frames from {vid_file.name}: {e2}")
+                else:
+                    print(f"  ERROR: Could not extract frames from {vid_file.name}: {e}")
 
     total = sum(1 for _ in FRAMES_DIR.rglob("*.png"))
     print(f"  Done. Total frames: {total:,}")
