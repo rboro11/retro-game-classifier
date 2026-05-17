@@ -36,28 +36,35 @@ REPORTS_DIR = ROOT / "reports"
 # the checkpoint config, but MODEL_REGISTRY keys are lowercase/underscored
 # (e.g. "resnet18", "efficientnet_b0").  This map handles both old checkpoints
 # that used the display name and future ones that may already use the key.
+#
+# NOTE: slugification replaces ALL hyphens with underscores, so "ResNet-18"
+# becomes "resnet_18" (not "resnet-18"). Both forms are listed below.
 # ─────────────────────────────────────────────────────────────────────────────
 _DISPLAY_TO_REGISTRY: dict[str, str] = {
     # Transfer models — display name produced by transfer_models.py meta dicts
-    "resnet-18":         "resnet18",
-    "resnet18":          "resnet18",
-    "resnet-50":         "resnet50",
-    "resnet50":          "resnet50",
-    "efficientnet-b0":   "efficientnet_b0",
-    "efficientnet_b0":   "efficientnet_b0",
-    "efficientnet-b2":   "efficientnet_b2",
-    "efficientnet_b2":   "efficientnet_b2",
-    "efficientnet-b3":   "efficientnet_b3",
-    "efficientnet_b3":   "efficientnet_b3",
-    "mobilenetv3-small": "mobilenet_v3",
-    "mobilenet_v3":      "mobilenet_v3",
-    "vit-b/16":          "vit_b16",
-    "vit_b16":           "vit_b16",
+    "resnet_18":          "resnet18",   # slug form of "ResNet-18"
+    "resnet-18":          "resnet18",
+    "resnet18":           "resnet18",
+    "resnet_50":          "resnet50",   # slug form of "ResNet-50"
+    "resnet-50":          "resnet50",
+    "resnet50":           "resnet50",
+    "efficientnet_b0":    "efficientnet_b0",
+    "efficientnet-b0":    "efficientnet_b0",
+    "efficientnet_b2":    "efficientnet_b2",
+    "efficientnet-b2":    "efficientnet_b2",
+    "efficientnet_b3":    "efficientnet_b3",
+    "efficientnet-b3":    "efficientnet_b3",
+    "mobilenetv3_small":  "mobilenet_v3",  # slug form of "MobileNetV3-Small"
+    "mobilenetv3-small":  "mobilenet_v3",
+    "mobilenet_v3":       "mobilenet_v3",
+    "vit_b_16":           "vit_b16",    # slug form of "ViT-B/16"
+    "vit-b/16":           "vit_b16",
+    "vit_b16":            "vit_b16",
     # Custom / audio — already use registry keys, included for completeness
-    "cnn_small":         "cnn_small",
-    "cnn_medium":        "cnn_medium",
-    "audio_cnn":         "audio_cnn",
-    "audio_transfer":    "audio_transfer",
+    "cnn_small":          "cnn_small",
+    "cnn_medium":         "cnn_medium",
+    "audio_cnn":          "audio_cnn",
+    "audio_transfer":     "audio_transfer",
 }
 
 
@@ -78,11 +85,9 @@ def _normalise_model_name(raw_name: str) -> str:
     """
     slug = raw_name.strip().lower().replace(" ", "_").replace("-", "_")
 
-    # Direct lookup (covers both original display names and registry keys)
     if slug in _DISPLAY_TO_REGISTRY:
         return _DISPLAY_TO_REGISTRY[slug]
 
-    # Fallback: return slug as-is and let the caller validate against MODEL_REGISTRY
     return slug
 
 
@@ -124,7 +129,6 @@ def load_model_from_checkpoint(ckpt_path: Path):
     model.load_state_dict(ckpt["model_state"])
     model.eval()
 
-    # Return the *display* name (raw_name) so benchmark labels stay human-readable
     return model, raw_name
 
 
@@ -136,7 +140,6 @@ def main():
     if classes_csv.exists():
         class_names = pd.read_csv(classes_csv)["label"].tolist()
     else:
-        # Fallback: scan frames dir
         class_names = sorted([d.name for d in FRAMES_DIR.iterdir()
                               if d.is_dir()]) if FRAMES_DIR.exists() else None
 
@@ -162,10 +165,14 @@ def main():
 
     print(f"\nCheckpoints loaded: {loaded}  |  skipped: {skipped}")
 
+    if loaded == 0:
+        print("No models loaded — cannot generate report.")
+        return
+
     # Generate full report
     bench.run_all(test_loader, class_names, device)
 
-    # Quick val-acc comparison chart (good for Colab inline display)
+    # Quick val-acc comparison chart
     plot_val_accuracy_comparison(
         str(CKPT_DIR),
         str(REPORTS_DIR / "val_acc_comparison.png"),
