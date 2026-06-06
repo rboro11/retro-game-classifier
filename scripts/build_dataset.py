@@ -4,16 +4,20 @@ build_dataset.py — plug-and-play dataset builder
 Run this ONCE after dropping raw files into data/raw/<ClassName>/
 
 Usage:
-    python scripts/build_dataset.py --mode frames    # extract frames from MP4s
+    python scripts/build_dataset.py --mode frames    # extract frames from MP4s only (no image copy)
     python scripts/build_dataset.py --mode audio     # extract .wav from MP4s
     python scripts/build_dataset.py --mode spectrograms  # generate mel-specs
     python scripts/build_dataset.py --mode splits    # create train/val/test CSVs
     python scripts/build_dataset.py --mode all       # run everything
+
+NOTE on disk usage:
+    Raw images (PNG/JPG) in data/raw/<Class>/ are referenced DIRECTLY in the
+    split CSVs — they are never copied into data/processed/.  Only video-extracted
+    frames land in data/processed/frames/.  This avoids doubling storage for
+    large image-only datasets like SMB1.
 """
 
 import os
-import sys
-import shutil
 import argparse
 import subprocess
 import random
@@ -61,39 +65,39 @@ def _ffmpeg_hwaccel_args() -> list:
 
 
 # ─────────────────────────────────────────────
-# Frame extraction (ffmpeg)
+# Frame extraction (ffmpeg — videos only)
 # ─────────────────────────────────────────────
 
 def extract_frames(fps: float = 1.0):
     """
-    For each class, extract frames from any MP4/video at <fps> fps.
-    Also copies any raw images directly.
-    Output: data/processed/frames/<ClassName>/<file>_f<N>.png
+    For each class folder under data/raw/, extract frames from video files
+    only (MP4, MOV, AVI, MKV) at <fps> fps.
+
+    Raw images are NOT copied — build_splits() references them directly
+    from data/raw/ to avoid doubling disk usage.
+
+    Output: data/processed/frames/<ClassName>/<videoname>_f<N>.png
 
     GPU acceleration is used automatically when a CUDA GPU is available
     via '-hwaccel auto' prepended to the ffmpeg command.
     """
-    print(f"\n[extract_frames] FPS = {fps}")
+    print(f"\n[extract_frames] FPS = {fps}  (images skipped — referenced directly from raw/)")
     hw_args = _ffmpeg_hwaccel_args()
 
     for class_dir in sorted(RAW_DIR.iterdir()):
         if not class_dir.is_dir():
             continue
+
+        # Count videos to process
+        videos = [f for f in class_dir.rglob("*") if f.suffix.lower() in VIDEO_EXTS]
+        if not videos:
+            print(f"  {class_dir.name}: no videos found, skipping.")
+            continue
+
         out_dir = FRAMES_DIR / class_dir.name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Direct images → copy (skip if already copied)
-        for img_file in class_dir.rglob("*"):
-            if img_file.suffix.lower() in IMG_EXTS:
-                dest = out_dir / img_file.name
-                if not dest.exists():
-                    shutil.copy2(img_file, dest)
-
-        # Videos → ffmpeg frame extraction
-        for vid_file in class_dir.rglob("*"):
-            if vid_file.suffix.lower() not in VIDEO_EXTS:
-                continue
-
+        for vid_file in videos:
             stem = vid_file.stem
             output = str(out_dir / f"{stem}_f%05d.png")
 
@@ -120,7 +124,7 @@ def extract_frames(fps: float = 1.0):
             print(f"  Extracting {vid_file.name} → {out_dir.name}/")
             try:
                 subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError as e:
+            except subprocess.CalledProcessError:
                 # If hwaccel caused a failure, retry without it
                 if hw_args:
                     print(f"  Warning: hwaccel failed for {vid_file.name}, retrying on CPU...")
@@ -140,10 +144,10 @@ def extract_frames(fps: float = 1.0):
                     except subprocess.CalledProcessError as e2:
                         print(f"  ERROR: Could not extract frames from {vid_file.name}: {e2}")
                 else:
-                    print(f"  ERROR: Could not extract frames from {vid_file.name}: {e}")
+                    print(f"  ERROR: Could not extract frames from {vid_file.name}")
 
-    total = sum(1 for _ in FRAMES_DIR.rglob("*.png"))
-    print(f"  Done. Total frames: {total:,}")
+    total = sum(1 for _ in FRAMES_DIR.rglob("*.png")) if FRAMES_DIR.exists() else 0
+    print(f"  Done. Total video-extracted frames: {total:,}")
 
 
 # ─────────────────────────────────────────────
@@ -177,7 +181,6 @@ def extract_audio(clip_duration: float = 10.0):
         for vid_file in class_dir.rglob("*"):
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
-            # Get duration
             dur_cmd = ["ffprobe", "-v", "error",
                        "-show_entries", "format=duration",
                        "-of", "default=noprint_wrappers=1:nokey=1",
@@ -186,7 +189,7 @@ def extract_audio(clip_duration: float = 10.0):
                 result = subprocess.run(dur_cmd, capture_output=True, text=True)
                 duration = float(result.stdout.strip())
             except Exception:
-                duration = 60.0  # assume 1 min if probe fails
+                duration = 60.0
 
             n_clips = max(1, int(duration / clip_duration))
             for i in range(n_clips):
@@ -229,7 +232,6 @@ def generate_spectrograms():
 
     import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
     print("\n[generate_spectrograms]")
     if not AUDIO_DIR.exists():
@@ -253,7 +255,6 @@ def generate_spectrograms():
                     y=y, sr=sr, n_fft=1024, hop_length=512, n_mels=128
                 )
                 mel_db = librosa.power_to_db(mel, ref=np.max)
-                # Save as grayscale PNG
                 mel_norm = ((mel_db - mel_db.min()) /
                             (mel_db.max() - mel_db.min() + 1e-8) * 255).astype("uint8")
                 Image.fromarray(mel_norm).save(dest)
@@ -271,8 +272,14 @@ def generate_spectrograms():
 def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
                  seed: int = 42):
     """
-    Scan data/processed/frames/ and data/processed/audio/ to build
-    train.csv / val.csv / test.csv.
+    Build train.csv / val.csv / test.csv by scanning:
+
+      1. data/raw/<Class>/          — raw images referenced directly (no copy)
+      2. data/processed/frames/<Class>/ — frames extracted from videos
+      3. data/processed/audio/<Class>/  — audio clips (if present)
+
+    Raw images are listed with their original path so no duplication occurs.
+    Video-extracted frames are listed from processed/frames/.
 
     Each row: filepath, label, label_idx, modality
     """
@@ -280,17 +287,37 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
     random.seed(seed)
     records = []
 
-    # Image frames
+    # --- Raw images (referenced in-place, no copy) ---
+    if RAW_DIR.exists():
+        for class_dir in sorted(RAW_DIR.iterdir()):
+            if not class_dir.is_dir():
+                continue
+            imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
+            for f in imgs:
+                records.append({
+                    "filepath": str(f),
+                    "label": class_dir.name,
+                    "modality": "image",
+                })
+            if imgs:
+                print(f"  [raw images] {class_dir.name}: {len(imgs):,} files")
+
+    # --- Video-extracted frames ---
     if FRAMES_DIR.exists():
         for class_dir in sorted(FRAMES_DIR.iterdir()):
             if not class_dir.is_dir():
                 continue
             imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
             for f in imgs:
-                records.append({"filepath": str(f), "label": class_dir.name,
-                                "modality": "image"})
+                records.append({
+                    "filepath": str(f),
+                    "label": class_dir.name,
+                    "modality": "image",
+                })
+            if imgs:
+                print(f"  [video frames] {class_dir.name}: {len(imgs):,} files")
 
-    # Audio (only if processed audio directory exists)
+    # --- Audio clips ---
     if AUDIO_DIR.exists():
         for class_dir in sorted(AUDIO_DIR.iterdir()):
             if not class_dir.is_dir():
@@ -300,14 +327,20 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
                 records.append({
                     "filepath": str(f),
                     "label": class_dir.name,
-                    "modality": "audio"
+                    "modality": "audio",
                 })
+            if wavs:
+                print(f"  [audio] {class_dir.name}: {len(wavs):,} clips")
 
     if not records:
-        print("No processed data found. Run --mode frames or --mode audio first.")
+        print("No data found. Check data/raw/ and data/processed/.")
         return
 
     df = pd.DataFrame(records)
+
+    # De-duplicate: same file path could theoretically appear twice
+    df = df.drop_duplicates(subset=["filepath"]).reset_index(drop=True)
+
     classes = sorted(df["label"].unique())
     class_to_idx = {c: i for i, c in enumerate(classes)}
     df["label_idx"] = df["label"].map(class_to_idx)
@@ -331,7 +364,6 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
     val_df.to_csv(SPLITS_DIR / "val.csv",     index=False)
     test_df.to_csv(SPLITS_DIR / "test.csv",   index=False)
 
-    # Save class mapping
     pd.DataFrame({"label": classes, "label_idx": range(len(classes))}).to_csv(
         SPLITS_DIR / "classes.csv", index=False
     )
@@ -339,6 +371,7 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
     print(f"\n[build_splits] Done.")
     print(f"  Classes ({len(classes)}): {classes}")
     print(f"  Train: {len(train_df):,}  |  Val: {len(val_df):,}  |  Test: {len(test_df):,}")
+    print(f"  Total unique files indexed: {len(df):,}")
 
 
 # ─────────────────────────────────────────────
@@ -350,7 +383,7 @@ def main():
     parser.add_argument("--mode", choices=["frames", "audio", "spectrograms",
                                            "splits", "all"], default="all")
     parser.add_argument("--fps",  type=float, default=1.0,
-                        help="Frames per second for frame extraction")
+                        help="Frames per second for frame extraction (videos only)")
     parser.add_argument("--clip_duration", type=float, default=10.0,
                         help="Audio clip duration in seconds")
     parser.add_argument("--val_ratio",  type=float, default=0.15)
