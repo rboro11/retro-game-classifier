@@ -12,9 +12,13 @@ Usage:
 
 NOTE on disk usage:
     Raw images (PNG/JPG) in data/raw/<Class>/ are referenced DIRECTLY in the
-    split CSVs — they are never copied into data/processed/.  Only video-extracted
-    frames land in data/processed/frames/.  This avoids doubling storage for
-    large image-only datasets like SMB1.
+    split CSVs — they are never copied into data/processed/.
+    Only video-extracted frames land in data/processed/frames/.
+
+NOTE on class imbalance:
+    Use --max_per_class N to cap any class at N samples (random, seeded).
+    Example: python scripts/build_dataset.py --mode splits --max_per_class 5000
+    Also pass --weighted_loss to print the loss weights for use in training.
 """
 
 import os
@@ -42,7 +46,6 @@ AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
 # ─────────────────────────────────────────────
 
 def _gpu_available() -> bool:
-    """Return True if a CUDA-capable GPU is visible to PyTorch."""
     try:
         import torch
         return torch.cuda.is_available()
@@ -51,12 +54,6 @@ def _gpu_available() -> bool:
 
 
 def _ffmpeg_hwaccel_args() -> list:
-    """
-    Return hardware-acceleration prefix args for ffmpeg if a GPU is available.
-    '-hwaccel auto' lets ffmpeg pick the best decoder (CUDA/NVDEC on NVIDIA,
-    VAAPI on Linux/Intel, VideoToolbox on macOS).  Falls back to CPU silently
-    if the codec or platform doesn't support it.
-    """
     if _gpu_available():
         print("  [GPU detected] Using -hwaccel auto for frame extraction.")
         return ["-hwaccel", "auto"]
@@ -70,16 +67,8 @@ def _ffmpeg_hwaccel_args() -> list:
 
 def extract_frames(fps: float = 1.0):
     """
-    For each class folder under data/raw/, extract frames from video files
-    only (MP4, MOV, AVI, MKV) at <fps> fps.
-
-    Raw images are NOT copied — build_splits() references them directly
-    from data/raw/ to avoid doubling disk usage.
-
+    Extract frames from video files only. Raw images are NOT copied.
     Output: data/processed/frames/<ClassName>/<videoname>_f<N>.png
-
-    GPU acceleration is used automatically when a CUDA GPU is available
-    via '-hwaccel auto' prepended to the ffmpeg command.
     """
     print(f"\n[extract_frames] FPS = {fps}  (images skipped — referenced directly from raw/)")
     hw_args = _ffmpeg_hwaccel_args()
@@ -88,7 +77,6 @@ def extract_frames(fps: float = 1.0):
         if not class_dir.is_dir():
             continue
 
-        # Count videos to process
         videos = [f for f in class_dir.rglob("*") if f.suffix.lower() in VIDEO_EXTS]
         if not videos:
             print(f"  {class_dir.name}: no videos found, skipping.")
@@ -101,48 +89,33 @@ def extract_frames(fps: float = 1.0):
             stem = vid_file.stem
             output = str(out_dir / f"{stem}_f%05d.png")
 
-            # Skip if frames were already extracted for this video
             existing = list(out_dir.glob(f"{stem}_f*.png"))
             if existing:
                 print(f"  Skipping {vid_file.name} ({len(existing)} frames already exist)")
                 continue
 
-            # hwaccel args go BEFORE -i; other args after
             cmd = (
                 ["ffmpeg", "-y"]
                 + hw_args
-                + [
-                    "-i", str(vid_file),
-                    "-vf", f"fps={fps}",
-                    "-q:v", "2",
-                    output,
-                    "-hide_banner",
-                    "-loglevel", "error",
-                ]
+                + ["-i", str(vid_file), "-vf", f"fps={fps}",
+                   "-q:v", "2", output, "-hide_banner", "-loglevel", "error"]
             )
 
             print(f"  Extracting {vid_file.name} → {out_dir.name}/")
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError:
-                # If hwaccel caused a failure, retry without it
                 if hw_args:
                     print(f"  Warning: hwaccel failed for {vid_file.name}, retrying on CPU...")
                     cmd_cpu = (
                         ["ffmpeg", "-y"]
-                        + [
-                            "-i", str(vid_file),
-                            "-vf", f"fps={fps}",
-                            "-q:v", "2",
-                            output,
-                            "-hide_banner",
-                            "-loglevel", "error",
-                        ]
+                        + ["-i", str(vid_file), "-vf", f"fps={fps}",
+                           "-q:v", "2", output, "-hide_banner", "-loglevel", "error"]
                     )
                     try:
                         subprocess.run(cmd_cpu, check=True)
                     except subprocess.CalledProcessError as e2:
-                        print(f"  ERROR: Could not extract frames from {vid_file.name}: {e2}")
+                        print(f"  ERROR: {vid_file.name}: {e2}")
                 else:
                     print(f"  ERROR: Could not extract frames from {vid_file.name}")
 
@@ -157,7 +130,6 @@ def extract_frames(fps: float = 1.0):
 def extract_audio(clip_duration: float = 10.0):
     """
     Extract audio clips from MP4s at fixed clip_duration intervals.
-    Also copies any raw audio files.
     Output: data/processed/audio/<ClassName>/<file>_clip<N>.wav
     """
     print(f"\n[extract_audio] Clip duration = {clip_duration}s")
@@ -167,7 +139,6 @@ def extract_audio(clip_duration: float = 10.0):
         out_dir = AUDIO_DIR / class_dir.name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Direct audio files → copy/convert
         for aud_file in class_dir.glob("*"):
             if aud_file.suffix.lower() in AUDIO_EXTS:
                 dest = out_dir / (aud_file.stem + ".wav")
@@ -177,7 +148,6 @@ def extract_audio(clip_duration: float = 10.0):
                            str(dest), "-loglevel", "error"]
                     subprocess.run(cmd, check=True)
 
-        # Videos → extract audio in chunks
         for vid_file in class_dir.rglob("*"):
             if vid_file.suffix.lower() not in VIDEO_EXTS:
                 continue
@@ -212,22 +182,16 @@ def extract_audio(clip_duration: float = 10.0):
 
 
 # ─────────────────────────────────────────────
-# Mel-spectrogram PNG generation (optional pre-compute)
+# Mel-spectrogram PNG generation
 # ─────────────────────────────────────────────
 
 def generate_spectrograms():
-    """
-    Pre-compute mel-spectrograms as PNG images so the audio dataset class
-    can work without on-the-fly computation.
-    Requires: librosa, PIL
-    """
     try:
         import librosa
-        import librosa.display
         import numpy as np
         from PIL import Image
     except ImportError:
-        print("Install librosa for spectrogram generation: pip install librosa")
+        print("Install librosa: pip install librosa")
         return
 
     import matplotlib
@@ -252,8 +216,7 @@ def generate_spectrograms():
             try:
                 y, sr = librosa.load(str(wav_file), sr=22050, mono=True)
                 mel = librosa.feature.melspectrogram(
-                    y=y, sr=sr, n_fft=1024, hop_length=512, n_mels=128
-                )
+                    y=y, sr=sr, n_fft=1024, hop_length=512, n_mels=128)
                 mel_db = librosa.power_to_db(mel, ref=np.max)
                 mel_norm = ((mel_db - mel_db.min()) /
                             (mel_db.max() - mel_db.min() + 1e-8) * 255).astype("uint8")
@@ -269,55 +232,72 @@ def generate_spectrograms():
 # Train / Val / Test splits
 # ─────────────────────────────────────────────
 
-def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
-                 seed: int = 42):
+def _collect_image_records(class_dir: Path, label: str) -> list:
+    """Return a list of image record dicts from a single class directory."""
+    return [
+        {"filepath": str(f), "label": label, "modality": "image"}
+        for f in class_dir.rglob("*")
+        if f.suffix.lower() in IMG_EXTS
+    ]
+
+
+def build_splits(
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    max_per_class: int = 0,   # 0 = no cap
+):
     """
-    Build train.csv / val.csv / test.csv by scanning:
+    Build train.csv / val.csv / test.csv.
 
-      1. data/raw/<Class>/          — raw images referenced directly (no copy)
-      2. data/processed/frames/<Class>/ — frames extracted from videos
-      3. data/processed/audio/<Class>/  — audio clips (if present)
+    Source priority per class (no double-counting):
+      • If data/processed/frames/<Class>/ exists  → use processed frames
+        (these came from videos; raw/ has no images for this class)
+      • Otherwise                                 → use data/raw/<Class>/ directly
+        (image-only class; never copied to processed/)
 
-    Raw images are listed with their original path so no duplication occurs.
-    Video-extracted frames are listed from processed/frames/.
+    max_per_class: if > 0, randomly subsample each class to this many files.
+    This is the primary tool for fixing class imbalance.
 
-    Each row: filepath, label, label_idx, modality
+    Each CSV row: filepath, label, label_idx, modality
     """
     SPLITS_DIR.mkdir(parents=True, exist_ok=True)
     random.seed(seed)
     records = []
 
-    # --- Raw images (referenced in-place, no copy) ---
-    if RAW_DIR.exists():
-        for class_dir in sorted(RAW_DIR.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
-            for f in imgs:
-                records.append({
-                    "filepath": str(f),
-                    "label": class_dir.name,
-                    "modality": "image",
-                })
-            if imgs:
-                print(f"  [raw images] {class_dir.name}: {len(imgs):,} files")
+    # Gather all known class names from both raw/ and processed/frames/
+    raw_classes    = {d.name for d in RAW_DIR.iterdir()    if d.is_dir()} if RAW_DIR.exists()    else set()
+    frames_classes = {d.name for d in FRAMES_DIR.iterdir() if d.is_dir()} if FRAMES_DIR.exists() else set()
+    all_classes    = raw_classes | frames_classes
 
-    # --- Video-extracted frames ---
-    if FRAMES_DIR.exists():
-        for class_dir in sorted(FRAMES_DIR.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            imgs = [f for f in class_dir.rglob("*") if f.suffix.lower() in IMG_EXTS]
-            for f in imgs:
-                records.append({
-                    "filepath": str(f),
-                    "label": class_dir.name,
-                    "modality": "image",
-                })
-            if imgs:
-                print(f"  [video frames] {class_dir.name}: {len(imgs):,} files")
+    for cls in sorted(all_classes):
+        frames_dir = FRAMES_DIR / cls
+        raw_dir    = RAW_DIR    / cls
 
-    # --- Audio clips ---
+        if frames_dir.exists() and any(frames_dir.rglob("*")):
+            # Class has video-extracted frames — use processed/frames/ only
+            cls_records = _collect_image_records(frames_dir, cls)
+            source = "video frames"
+        elif raw_dir.exists():
+            # Image-only class — reference raw/ directly
+            cls_records = _collect_image_records(raw_dir, cls)
+            source = "raw images"
+        else:
+            print(f"  WARNING: no data found for class '{cls}', skipping.")
+            continue
+
+        n_raw = len(cls_records)
+
+        # Apply per-class cap if requested
+        if max_per_class > 0 and n_raw > max_per_class:
+            cls_records = random.sample(cls_records, max_per_class)
+            print(f"  [{source}] {cls}: {n_raw:,} → capped at {max_per_class:,}")
+        else:
+            print(f"  [{source}] {cls}: {n_raw:,} files")
+
+        records.extend(cls_records)
+
+    # --- Audio clips (always additive, no overlap with images) ---
     if AUDIO_DIR.exists():
         for class_dir in sorted(AUDIO_DIR.iterdir()):
             if not class_dir.is_dir():
@@ -337,13 +317,23 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
         return
 
     df = pd.DataFrame(records)
-
-    # De-duplicate: same file path could theoretically appear twice
-    df = df.drop_duplicates(subset=["filepath"]).reset_index(drop=True)
-
     classes = sorted(df["label"].unique())
     class_to_idx = {c: i for i, c in enumerate(classes)}
     df["label_idx"] = df["label"].map(class_to_idx)
+
+    # Print class distribution + suggested loss weights
+    print("\n  Class distribution:")
+    counts = df["label"].value_counts().sort_index()
+    total  = len(df)
+    for cls, n in counts.items():
+        print(f"    {cls}: {n:,}  ({n/total*100:.1f}%)")
+
+    # Weighted loss hint (inverse-frequency)
+    max_count = counts.max()
+    weights   = {cls: round(max_count / n, 4) for cls, n in counts.items()}
+    print(f"\n  Suggested CrossEntropyLoss weights (inverse-frequency):")
+    print(f"    {weights}")
+    print(f"  Usage: loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([{', '.join(str(weights[c]) for c in sorted(weights))}]))")
 
     # Stratified split per class
     train_rows, val_rows, test_rows = [], [], []
@@ -353,7 +343,7 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
         n_test = max(1, int(n * test_ratio))
         n_val  = max(1, int(n * val_ratio))
         test_rows.append(cls_df.iloc[:n_test])
-        val_rows.append(cls_df.iloc[n_test:n_test + n_val])
+        val_rows.append( cls_df.iloc[n_test:n_test + n_val])
         train_rows.append(cls_df.iloc[n_test + n_val:])
 
     train_df = pd.concat(train_rows).reset_index(drop=True)
@@ -361,12 +351,19 @@ def build_splits(val_ratio: float = 0.15, test_ratio: float = 0.15,
     test_df  = pd.concat(test_rows).reset_index(drop=True)
 
     train_df.to_csv(SPLITS_DIR / "train.csv", index=False)
-    val_df.to_csv(SPLITS_DIR / "val.csv",     index=False)
-    test_df.to_csv(SPLITS_DIR / "test.csv",   index=False)
+    val_df.to_csv(  SPLITS_DIR / "val.csv",   index=False)
+    test_df.to_csv( SPLITS_DIR / "test.csv",  index=False)
 
     pd.DataFrame({"label": classes, "label_idx": range(len(classes))}).to_csv(
         SPLITS_DIR / "classes.csv", index=False
     )
+
+    # Save weights for training scripts to load
+    pd.DataFrame([
+        {"label": cls, "label_idx": class_to_idx[cls], "loss_weight": weights[cls]}
+        for cls in classes
+    ]).to_csv(SPLITS_DIR / "class_weights.csv", index=False)
+    print(f"  Loss weights saved to: data/processed/splits/class_weights.csv")
 
     print(f"\n[build_splits] Done.")
     print(f"  Classes ({len(classes)}): {classes}")
@@ -382,19 +379,27 @@ def main():
     parser = argparse.ArgumentParser(description="Retro Game Classifier — Dataset Builder")
     parser.add_argument("--mode", choices=["frames", "audio", "spectrograms",
                                            "splits", "all"], default="all")
-    parser.add_argument("--fps",  type=float, default=1.0,
-                        help="Frames per second for frame extraction (videos only)")
-    parser.add_argument("--clip_duration", type=float, default=10.0,
-                        help="Audio clip duration in seconds")
-    parser.add_argument("--val_ratio",  type=float, default=0.15)
-    parser.add_argument("--test_ratio", type=float, default=0.15)
+    parser.add_argument("--fps",           type=float, default=1.0)
+    parser.add_argument("--clip_duration", type=float, default=10.0)
+    parser.add_argument("--val_ratio",     type=float, default=0.15)
+    parser.add_argument("--test_ratio",    type=float, default=0.15)
+    parser.add_argument(
+        "--max_per_class", type=int, default=0,
+        help="Cap each class at this many samples (0 = no cap). "
+             "Recommended: set to ~2x your smallest class size to reduce imbalance."
+    )
     args = parser.parse_args()
 
     mode = args.mode
     if mode in ("frames",       "all"): extract_frames(fps=args.fps)
     if mode in ("audio",        "all"): extract_audio(clip_duration=args.clip_duration)
     if mode in ("spectrograms", "all"): generate_spectrograms()
-    if mode in ("splits",       "all"): build_splits(args.val_ratio, args.test_ratio)
+    if mode in ("splits",       "all"):
+        build_splits(
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            max_per_class=args.max_per_class,
+        )
 
 
 if __name__ == "__main__":
