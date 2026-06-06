@@ -19,6 +19,16 @@ NOTE on class imbalance:
     Use --max_per_class N to cap any class at N samples (random, seeded).
     Example: python scripts/build_dataset.py --mode splits --max_per_class 5000
     Also pass --weighted_loss to print the loss weights for use in training.
+
+NOTE on session-level splitting:
+    For classes whose raw/ directory contains subdirectories (e.g. the public
+    SMB1 dataset organised by level: 1-1/, 1-2/, 8-2/ …), the split is done
+    at the SUBDIRECTORY (session) level — all frames from one session go to
+    exactly one split.  This prevents near-identical sequential frames from
+    appearing in both train and val, which causes artificially inflated
+    validation accuracy.
+    Classes whose images sit directly in raw/<Class>/ (flat layout, e.g.
+    video-extracted SMB3 frames) are split per-file as before.
 """
 
 import os
@@ -229,17 +239,107 @@ def generate_spectrograms():
 
 
 # ─────────────────────────────────────────────
-# Train / Val / Test splits
+# Session-level split helper
 # ─────────────────────────────────────────────
 
+def _has_subdirectory_layout(class_dir: Path) -> bool:
+    """
+    Return True when a class directory organises images into subdirectories
+    (e.g. SMB1/1-1/, SMB1/8-2/).  In that case we must split at the
+    subdirectory (session) level to avoid leaking near-identical frames
+    across train/val/test.
+    """
+    return any(p.is_dir() for p in class_dir.iterdir())
+
+
+def _session_level_split(
+    class_dir: Path,
+    label: str,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+    max_per_class: int,
+) -> tuple[list, list, list]:
+    """
+    Group images by immediate subdirectory (session), shuffle the SESSION
+    list, then assign whole sessions to train/val/test in ratio.
+    Returns (train_records, val_records, test_records).
+    """
+    rng = random.Random(seed)
+
+    # Build session → [file paths] map
+    sessions: dict[str, list] = {}
+    for sub in sorted(class_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        imgs = [f for f in sub.rglob("*") if f.suffix.lower() in IMG_EXTS]
+        if imgs:
+            sessions[sub.name] = imgs
+
+    if not sessions:
+        return [], [], []
+
+    session_names = sorted(sessions.keys())
+    rng.shuffle(session_names)
+
+    n = len(session_names)
+    n_test = max(1, int(n * test_ratio))
+    n_val  = max(1, int(n * val_ratio))
+    n_train = n - n_test - n_val
+
+    test_sessions  = session_names[:n_test]
+    val_sessions   = session_names[n_test:n_test + n_val]
+    train_sessions = session_names[n_test + n_val:]
+
+    def _to_records(sess_list):
+        recs = []
+        for s in sess_list:
+            for f in sessions[s]:
+                recs.append({"filepath": str(f), "label": label, "modality": "image"})
+        return recs
+
+    train_recs = _to_records(train_sessions)
+    val_recs   = _to_records(val_sessions)
+    test_recs  = _to_records(test_sessions)
+
+    total_recs = train_recs + val_recs + test_recs
+    n_total    = len(total_recs)
+
+    # Apply per-class cap proportionally across splits if needed
+    if max_per_class > 0 and n_total > max_per_class:
+        scale = max_per_class / n_total
+        train_recs = rng.sample(train_recs, max(1, int(len(train_recs) * scale)))
+        val_recs   = rng.sample(val_recs,   max(1, int(len(val_recs)   * scale)))
+        test_recs  = rng.sample(test_recs,  max(1, int(len(test_recs)  * scale)))
+        print(f"  [session-split] {label}: {n_total:,} frames across {n} sessions "
+              f"→ capped to ~{max_per_class:,}  "
+              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
+    else:
+        print(f"  [session-split] {label}: {n_total:,} frames across {n} sessions  "
+              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
+
+    print(f"    Test sessions  ({len(test_sessions)}): {test_sessions[:5]}"
+          f"{'...' if len(test_sessions) > 5 else ''}")
+    print(f"    Val  sessions  ({len(val_sessions)}):  {val_sessions[:5]}"
+          f"{'...' if len(val_sessions) > 5 else ''}")
+    print(f"    Train sessions ({len(train_sessions)}): {train_sessions[:5]}"
+          f"{'...' if len(train_sessions) > 5 else ''}")
+
+    return train_recs, val_recs, test_recs
+
+
 def _collect_image_records(class_dir: Path, label: str) -> list:
-    """Return a list of image record dicts from a single class directory."""
+    """Return a list of image record dicts from a single class directory (flat layout)."""
     return [
         {"filepath": str(f), "label": label, "modality": "image"}
         for f in class_dir.rglob("*")
         if f.suffix.lower() in IMG_EXTS
     ]
 
+
+# ─────────────────────────────────────────────
+# Train / Val / Test splits
+# ─────────────────────────────────────────────
 
 def build_splits(
     val_ratio: float = 0.15,
@@ -256,6 +356,14 @@ def build_splits(
       • Otherwise                                 → use data/raw/<Class>/ directly
         (image-only class; never copied to processed/)
 
+    Split strategy:
+      • Classes with a subdirectory layout (e.g. SMB1 organised by level)
+        are split at the SESSION (subdirectory) level — every frame in a
+        given session goes to exactly one of train/val/test.  This prevents
+        near-identical sequential frames from leaking across splits.
+      • Classes with a flat image layout (e.g. video-extracted SMB3 frames
+        sitting directly in the class folder) are split per-file.
+
     max_per_class: if > 0, randomly subsample each class to this many files.
     This is the primary tool for fixing class imbalance.
 
@@ -263,39 +371,60 @@ def build_splits(
     """
     SPLITS_DIR.mkdir(parents=True, exist_ok=True)
     random.seed(seed)
-    records = []
 
     # Gather all known class names from both raw/ and processed/frames/
     raw_classes    = {d.name for d in RAW_DIR.iterdir()    if d.is_dir()} if RAW_DIR.exists()    else set()
     frames_classes = {d.name for d in FRAMES_DIR.iterdir() if d.is_dir()} if FRAMES_DIR.exists() else set()
     all_classes    = raw_classes | frames_classes
 
+    # We build per-split lists so session-based classes can inject directly
+    all_train, all_val, all_test = [], [], []
+    all_records = []   # used only for class-distribution stats
+
     for cls in sorted(all_classes):
         frames_dir = FRAMES_DIR / cls
         raw_dir    = RAW_DIR    / cls
 
         if frames_dir.exists() and any(frames_dir.rglob("*")):
-            # Class has video-extracted frames — use processed/frames/ only
-            cls_records = _collect_image_records(frames_dir, cls)
-            source = "video frames"
+            source_dir = frames_dir
+            source     = "video frames"
         elif raw_dir.exists():
-            # Image-only class — reference raw/ directly
-            cls_records = _collect_image_records(raw_dir, cls)
-            source = "raw images"
+            source_dir = raw_dir
+            source     = "raw images"
         else:
             print(f"  WARNING: no data found for class '{cls}', skipping.")
             continue
 
-        n_raw = len(cls_records)
+        # ── Session-level split (subdirectory layout) ──────────────────
+        if _has_subdirectory_layout(source_dir):
+            tr, va, te = _session_level_split(
+                source_dir, cls, val_ratio, test_ratio, seed, max_per_class
+            )
+            all_train.extend(tr)
+            all_val.extend(va)
+            all_test.extend(te)
+            all_records.extend(tr + va + te)
 
-        # Apply per-class cap if requested
-        if max_per_class > 0 and n_raw > max_per_class:
-            cls_records = random.sample(cls_records, max_per_class)
-            print(f"  [{source}] {cls}: {n_raw:,} → capped at {max_per_class:,}")
+        # ── Per-file split (flat layout) ────────────────────────────────
         else:
-            print(f"  [{source}] {cls}: {n_raw:,} files")
+            cls_records = _collect_image_records(source_dir, cls)
+            n_raw = len(cls_records)
 
-        records.extend(cls_records)
+            if max_per_class > 0 and n_raw > max_per_class:
+                cls_records = random.sample(cls_records, max_per_class)
+                print(f"  [{source}] {cls}: {n_raw:,} → capped at {max_per_class:,}")
+            else:
+                print(f"  [{source}] {cls}: {n_raw:,} files")
+
+            # Stratified per-file split
+            random.shuffle(cls_records)
+            n = len(cls_records)
+            n_test = max(1, int(n * test_ratio))
+            n_val  = max(1, int(n * val_ratio))
+            all_test.extend(cls_records[:n_test])
+            all_val.extend( cls_records[n_test:n_test + n_val])
+            all_train.extend(cls_records[n_test + n_val:])
+            all_records.extend(cls_records)
 
     # --- Audio clips (always additive, no overlap with images) ---
     if AUDIO_DIR.exists():
@@ -304,27 +433,32 @@ def build_splits(
                 continue
             wavs = list(class_dir.glob("*.wav"))
             for f in wavs:
-                records.append({
-                    "filepath": str(f),
-                    "label": class_dir.name,
-                    "modality": "audio",
-                })
+                rec = {"filepath": str(f), "label": class_dir.name, "modality": "audio"}
+                all_records.append(rec)
+                # Simple per-file split for audio
+                r = random.random()
+                if r < test_ratio:
+                    all_test.append(rec)
+                elif r < test_ratio + val_ratio:
+                    all_val.append(rec)
+                else:
+                    all_train.append(rec)
             if wavs:
                 print(f"  [audio] {class_dir.name}: {len(wavs):,} clips")
 
-    if not records:
+    if not all_records:
         print("No data found. Check data/raw/ and data/processed/.")
         return
 
-    df = pd.DataFrame(records)
-    classes = sorted(df["label"].unique())
+    df_all = pd.DataFrame(all_records)
+    classes = sorted(df_all["label"].unique())
     class_to_idx = {c: i for i, c in enumerate(classes)}
-    df["label_idx"] = df["label"].map(class_to_idx)
+    df_all["label_idx"] = df_all["label"].map(class_to_idx)
 
     # Print class distribution + suggested loss weights
     print("\n  Class distribution:")
-    counts = df["label"].value_counts().sort_index()
-    total  = len(df)
+    counts = df_all["label"].value_counts().sort_index()
+    total  = len(df_all)
     for cls, n in counts.items():
         print(f"    {cls}: {n:,}  ({n/total*100:.1f}%)")
 
@@ -335,20 +469,15 @@ def build_splits(
     print(f"    {weights}")
     print(f"  Usage: loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([{', '.join(str(weights[c]) for c in sorted(weights))}]))")
 
-    # Stratified split per class
-    train_rows, val_rows, test_rows = [], [], []
-    for cls in classes:
-        cls_df = df[df["label"] == cls].sample(frac=1, random_state=seed)
-        n = len(cls_df)
-        n_test = max(1, int(n * test_ratio))
-        n_val  = max(1, int(n * val_ratio))
-        test_rows.append(cls_df.iloc[:n_test])
-        val_rows.append( cls_df.iloc[n_test:n_test + n_val])
-        train_rows.append(cls_df.iloc[n_test + n_val:])
+    # Write CSVs
+    def _label_idx(rows):
+        df = pd.DataFrame(rows)
+        df["label_idx"] = df["label"].map(class_to_idx)
+        return df.reset_index(drop=True)
 
-    train_df = pd.concat(train_rows).reset_index(drop=True)
-    val_df   = pd.concat(val_rows).reset_index(drop=True)
-    test_df  = pd.concat(test_rows).reset_index(drop=True)
+    train_df = _label_idx(all_train)
+    val_df   = _label_idx(all_val)
+    test_df  = _label_idx(all_test)
 
     train_df.to_csv(SPLITS_DIR / "train.csv", index=False)
     val_df.to_csv(  SPLITS_DIR / "val.csv",   index=False)
@@ -368,7 +497,7 @@ def build_splits(
     print(f"\n[build_splits] Done.")
     print(f"  Classes ({len(classes)}): {classes}")
     print(f"  Train: {len(train_df):,}  |  Val: {len(val_df):,}  |  Test: {len(test_df):,}")
-    print(f"  Total unique files indexed: {len(df):,}")
+    print(f"  Total unique files indexed: {len(df_all):,}")
 
 
 # ─────────────────────────────────────────────
