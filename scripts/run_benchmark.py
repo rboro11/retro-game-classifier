@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from data.dataset      import MarioImageDataset, get_dataloader
-from models.cnn_custom import MarioCNNSmall, MarioCNNMedium
+from data.dataset      import RetroImageDataset, get_dataloader
+from models.cnn_custom import CNNSmall, CNNMedium
 from models.transfer_models import build_model, MODEL_REGISTRY
 from models.audio_model     import SpectrogramCNN, SpectrogramTransferNet
 from evaluation.benchmarker import Benchmarker, plot_val_accuracy_comparison
@@ -100,14 +100,14 @@ def load_model_from_checkpoint(ckpt_path: Path):
 
     model_key = _normalise_model_name(raw_name)
 
-    # ── Custom CNN models ────────────────────────────────────────────────────
+    # ── Custom CNN models ────────────────────────────────────────────
     if model_key == "cnn_small":
-        model = MarioCNNSmall(num_classes=num_classes)
+        model = CNNSmall(num_classes=num_classes)
 
     elif model_key == "cnn_medium":
-        model = MarioCNNMedium(num_classes=num_classes)
+        model = CNNMedium(num_classes=num_classes)
 
-    # ── Audio models ─────────────────────────────────────────────────────────
+    # ── Audio models ───────────────────────────────────────────────
     elif model_key == "audio_cnn":
         model = SpectrogramCNN(num_classes=num_classes)
 
@@ -146,7 +146,7 @@ def main():
     print(f"Classes: {class_names}")
 
     # Build test dataset
-    test_ds     = MarioImageDataset(FRAMES_DIR, split="test")
+    test_ds     = RetroImageDataset(FRAMES_DIR, split="test")
     test_loader = get_dataloader(test_ds, batch_size=32, num_workers=0)
 
     # Initialise benchmarker (auto-loads all *_history.json)

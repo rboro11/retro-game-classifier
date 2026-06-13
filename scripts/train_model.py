@@ -24,10 +24,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.dataset import (
-    MarioImageDataset, MarioAudioDataset,
+    RetroImageDataset, RetroAudioDataset,
     get_image_transforms, get_nes_transforms, get_dataloader
 )
-from models.cnn_custom    import MarioCNNSmall, MarioCNNMedium
+from models.cnn_custom    import CNNSmall, CNNMedium
 from models.transfer_models import build_model, MODEL_REGISTRY
 from models.audio_model   import SpectrogramCNN, SpectrogramTransferNet
 from training.trainer     import Trainer, TrainConfig
@@ -61,15 +61,15 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # ── Build model ─────────────────────────────
+    # ── Build model ────────────────────────────────────
     if args.model == "cnn_small":
         img_size = args.img_size or 64
-        model = MarioCNNSmall(num_classes=args.num_classes, img_size=img_size)
+        model = CNNSmall(num_classes=args.num_classes, img_size=img_size)
         meta  = {"name": "cnn_small", "img_size": img_size}
 
     elif args.model == "cnn_medium":
         img_size = args.img_size or 224
-        model = MarioCNNMedium(num_classes=args.num_classes)
+        model = CNNMedium(num_classes=args.num_classes)
         meta  = {"name": "cnn_medium", "img_size": img_size}
 
     elif args.model == "audio_cnn":
@@ -89,17 +89,17 @@ def main():
     print(f"\nModel: {meta['name']} | img_size={img_size} | "
           f"classes={args.num_classes}")
 
-    # ── Build datasets ───────────────────────────
+    # ── Build datasets ───────────────────────────────────
     if args.modality == "image":
         data_root = FRAMES_DIR
-        train_ds  = MarioImageDataset(data_root, split="train",
+        train_ds  = RetroImageDataset(data_root, split="train",
                                        img_size=img_size)
-        val_ds    = MarioImageDataset(data_root, split="val",
+        val_ds    = RetroImageDataset(data_root, split="val",
                                        transform=get_image_transforms("val", img_size))
     else:
         data_root = AUDIO_DIR
-        train_ds  = MarioAudioDataset(data_root, split="train")
-        val_ds    = MarioAudioDataset(data_root, split="val")
+        train_ds  = RetroAudioDataset(data_root, split="train")
+        val_ds    = RetroAudioDataset(data_root, split="val")
 
     print(f"Train: {len(train_ds):,} samples | Val: {len(val_ds):,} samples")
     print(f"Classes: {train_ds.classes}")
@@ -108,7 +108,7 @@ def main():
                                   balanced=args.balanced)
     val_loader   = get_dataloader(val_ds, args.batch_size)
 
-    # ── Train ────────────────────────────────────
+    # ── Train ────────────────────────────────────────
     cfg = TrainConfig(
         model_name=meta["name"],
         num_classes=args.num_classes,
