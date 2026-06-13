@@ -32,6 +32,16 @@ NOTE on split strategies (three tiers):
      exactly one split.  This prevents near-identical consecutive frames from
      leaking across train/val/test even when the files sit in a flat folder.
 
+     SINGLE-SOURCE FALLBACK: When only one (or too few) video clips are
+     present to fill all three splits, _video_stem_split() automatically
+     falls back to a CHRONOLOGICAL FRAME-LEVEL split.  Frames are sorted by
+     filename (the _fNNNNN suffix encodes time), then sliced sequentially:
+       • test  → first  test_ratio  portion  (early frames)
+       • val   → next   val_ratio   portion  (middle frames)
+       • train → remainder                   (later frames)
+     This avoids crashes and manual Session-folder workarounds while still
+     producing a meaningful temporal holdout from a single source video.
+
   3. FLAT LAYOUT without _fNNNNN naming (generic image classes)
      Split per-file as before.
 """
@@ -282,10 +292,22 @@ def _video_stem_split(
     shuffle those groups, then assign whole groups to train/val/test.
 
     Example:
-        SMB3_1_cropped_f00001.png  \u21d2  group 'SMB3_1_cropped'
-        SMB3_2_cropped_f00001.png  \u21d2  group 'SMB3_2_cropped'
+        SMB3_1_cropped_f00001.png  =>  group 'SMB3_1_cropped'
+        SMB3_2_cropped_f00001.png  =>  group 'SMB3_2_cropped'
 
     All frames from one clip land in exactly one split.
+
+    SINGLE-SOURCE FALLBACK
+    ----------------------
+    When there are too few groups to populate all three splits (i.e. fewer
+    than 3 distinct video stems), the function falls back to a chronological
+    frame-level split instead of crashing.  Frames are sorted by filename
+    (the _fNNNNN suffix encodes recording time) and sliced sequentially:
+        test  → first  test_ratio  portion   (early frames)
+        val   → next   val_ratio   portion   (middle frames)
+        train → remainder                    (later frames)
+    A WARNING is printed so the caller knows the fallback was triggered.
+
     Returns (train_records, val_records, test_records).
     """
     rng = random.Random(seed)
@@ -303,6 +325,53 @@ def _video_stem_split(
         return [], [], []
 
     group_names = sorted(groups.keys())
+    min_groups_needed = 3  # need at least one group per split
+
+    # ── SINGLE-SOURCE FALLBACK ───────────────────────────────────────────
+    if len(group_names) < min_groups_needed:
+        print(
+            f"  WARNING [{label}]: only {len(group_names)} video clip(s) detected — "
+            f"not enough to fill train/val/test at the clip level.\n"
+            f"  Falling back to CHRONOLOGICAL FRAME-LEVEL split "
+            f"(sorted by filename, sliced sequentially).\n"
+            f"  test={test_ratio:.0%} of early frames | "
+            f"val={val_ratio:.0%} of middle frames | "
+            f"train=remainder of later frames."
+        )
+        # Collect all frames sorted by filename (encodes time via _fNNNNN)
+        all_frames = sorted(
+            [f for f in class_dir.iterdir() if f.suffix.lower() in IMG_EXTS],
+            key=lambda f: f.name,
+        )
+        n_total = len(all_frames)
+        n_test  = max(1, int(n_total * test_ratio))
+        n_val   = max(1, int(n_total * val_ratio))
+
+        test_frames  = all_frames[:n_test]
+        val_frames   = all_frames[n_test:n_test + n_val]
+        train_frames = all_frames[n_test + n_val:]
+
+        def _frames_to_records(flist):
+            return [{"filepath": str(f), "label": label, "modality": "image"} for f in flist]
+
+        train_recs = _frames_to_records(train_frames)
+        val_recs   = _frames_to_records(val_frames)
+        test_recs  = _frames_to_records(test_frames)
+
+        if max_per_class > 0 and n_total > max_per_class:
+            scale = max_per_class / n_total
+            train_recs = rng.sample(train_recs, max(1, int(len(train_recs) * scale)))
+            val_recs   = rng.sample(val_recs,   max(1, int(len(val_recs)   * scale)))
+            test_recs  = rng.sample(test_recs,  max(1, int(len(test_recs)  * scale)))
+
+        print(
+            f"  [frame-level-fallback] {label}: {n_total:,} frames "
+            f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})"
+        )
+        print(f"    Clips present ({len(group_names)}): {group_names}")
+        return train_recs, val_recs, test_recs
+
+    # ── NORMAL CLIP-LEVEL SPLIT ──────────────────────────────────────────
     rng.shuffle(group_names)
 
     n = len(group_names)
@@ -446,6 +515,7 @@ def build_splits(
     Split strategy (auto-detected per class):
       1. Subdirectory layout   → _session_level_split()   (e.g. SMB1)
       2. Flat + _fNNNNN names  → _video_stem_split()      (e.g. SMB3 clips)
+         └─ single-source fallback → chronological frame-level split
       3. Flat generic images   → per-file shuffle split
 
     Each CSV row: filepath, label, label_idx, modality
