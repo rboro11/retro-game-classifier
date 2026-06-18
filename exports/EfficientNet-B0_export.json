@@ -1,0 +1,33 @@
+{
+  "architecture": {
+    "registry_key": "efficientnet_b0",
+    "display_name": "EfficientNet-B0",
+    "num_classes": 2
+  },
+  "inference": {
+    "img_size": 224,
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "class_names": [
+      "SMB1",
+      "SMB3"
+    ]
+  },
+  "training": {
+    "best_val_acc": 1.0,
+    "best_epoch": 1,
+    "train_time_min": 8.7,
+    "test_acc": 1.0,
+    "num_classes": 2,
+    "original_ckpt": "EfficientNet-B0_best.pt"
+  },
+  "file_size_mb": 16.34
+}
