@@ -27,7 +27,7 @@ from data.dataset import (
     MarioImageDataset, MarioAudioDataset,
     get_image_transforms, get_nes_transforms, get_dataloader
 )
-from models.cnn_custom    import CNNSmall, CNNMedium
+from models.cnn_custom    import MarioCNNSmall, MarioCNNMedium
 from models.transfer_models import build_model, MODEL_REGISTRY
 from models.audio_model   import SpectrogramCNN, SpectrogramTransferNet
 from training.trainer     import Trainer, TrainConfig
@@ -64,12 +64,12 @@ def main():
     # ── Build model ────────────────────────────────────
     if args.model == "cnn_small":
         img_size = args.img_size or 64
-        model = CNNSmall(num_classes=args.num_classes, img_size=img_size)
+        model = MarioCNNSmall(num_classes=args.num_classes, img_size=img_size)
         meta  = {"name": "cnn_small", "img_size": img_size}
 
     elif args.model == "cnn_medium":
         img_size = args.img_size or 224
-        model = CNNMedium(num_classes=args.num_classes)
+        model = MarioCNNMedium(num_classes=args.num_classes)
         meta  = {"name": "cnn_medium", "img_size": img_size}
 
     elif args.model == "audio_cnn":
