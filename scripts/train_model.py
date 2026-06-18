@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from data.dataset import (
-    RetroImageDataset, RetroAudioDataset,
+    MarioImageDataset, MarioAudioDataset,
     get_image_transforms, get_nes_transforms, get_dataloader
 )
 from models.cnn_custom    import CNNSmall, CNNMedium
@@ -92,14 +92,14 @@ def main():
     # ── Build datasets ───────────────────────────────────
     if args.modality == "image":
         data_root = FRAMES_DIR
-        train_ds  = RetroImageDataset(data_root, split="train",
+        train_ds  = MarioImageDataset(data_root, split="train",
                                        img_size=img_size)
-        val_ds    = RetroImageDataset(data_root, split="val",
+        val_ds    = MarioImageDataset(data_root, split="val",
                                        transform=get_image_transforms("val", img_size))
     else:
         data_root = AUDIO_DIR
-        train_ds  = RetroAudioDataset(data_root, split="train")
-        val_ds    = RetroAudioDataset(data_root, split="val")
+        train_ds  = MarioAudioDataset(data_root, split="train")
+        val_ds    = MarioAudioDataset(data_root, split="val")
 
     print(f"Train: {len(train_ds):,} samples | Val: {len(val_ds):,} samples")
     print(f"Classes: {train_ds.classes}")
