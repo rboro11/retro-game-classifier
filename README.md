@@ -8,6 +8,8 @@ A deep learning project for identifying which retro Mario game a screenshot belo
 
 This repository contains a local-runtime workflow for building datasets, training image classifiers, evaluating results, exporting a deployment bundle, and serving predictions through a Gradio app. The current notebook pipeline mounts Drive storage, prepares local runtime paths, builds processed frame datasets, creates train/validation/test splits, trains EfficientNet-B0, evaluates it, exports the best model bundle, and prepares deployment assets for a Hugging Face Space.
 
+The primary end-to-end notebook for the current 3-class SMB1/SMB2/SMB3 image build is `notebooks/retro_game_classifier_1v2v3.ipynb`, which implements the local-runtime-first workflow described above. Earlier notebook iterations (including the original binary SMB1-vs-SMB3 build) are preserved under `notebooks/archive/` for historical reference and baseline comparison.
+
 ## Project phases
 
 The long-term roadmap is broader than the current 3-class image model and includes visual, audio, video, and multi-modal stages. The original project plan outlines six phases, starting from a binary screenshot classifier and expanding toward a larger multi-modal Mario identifier.
