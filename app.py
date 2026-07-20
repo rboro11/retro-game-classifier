@@ -2,7 +2,8 @@
 app.py — Gradio inference app for the Retro Game Classifier
 
 Loads the exported EfficientNet-B0 bundle and classifies a screenshot
-as either Super Mario Bros. (SMB1) or Super Mario Bros. 3 (SMB3).
+as Super Mario Bros. (SMB1), Super Mario Bros. 2 (SMB2), or
+Super Mario Bros. 3 (SMB3).
 
 Run locally:
     python app.py
@@ -39,7 +40,7 @@ arch      = bundle["architecture"]
 inf_cfg   = bundle["inference"]
 training  = bundle["training"]
 
-CLASS_NAMES = inf_cfg["class_names"]   # ['SMB1', 'SMB3']
+CLASS_NAMES = inf_cfg["class_names"]   # ['SMB1', 'SMB2', 'SMB3']
 IMG_SIZE    = inf_cfg["img_size"]       # 224
 MEAN        = inf_cfg["mean"]
 STD         = inf_cfg["std"]
@@ -128,11 +129,12 @@ MODEL_INFO = (
 
 DESCRIPTION = """
 Upload a screenshot or gameplay frame and the model will identify
-whether it's from **Super Mario Bros.** (NES, 1985) or
+which game it's from: **Super Mario Bros.** (NES, 1985),
+**Super Mario Bros. 2** (NES, 1988), or
 **Super Mario Bros. 3** (NES, 1988).
 
-This is Phase 1 of a broader retro game classifier — trained on
-self-collected gameplay footage, evaluated on held-out video clips.
+This is a 3-class image classifier (Phase 2) trained on self-collected
+gameplay footage, evaluated on held-out video clips.
 
 > **Tip:** Direct screenshots give the best results. If using the camera,
 > point it straight at the screen and crop out any borders for highest accuracy.
@@ -174,7 +176,7 @@ with gr.Blocks(title="Retro Game Classifier", theme=gr.themes.Soft()) as demo:
     gr.Markdown(
         "---\n"
         "**Source:** [retro-game-classifier](https://github.com/rboro11/retro-game-classifier) · "
-        "Phase 1 binary classifier · EfficientNet-B0 fine-tuned on self-collected NES gameplay footage."
+        "3-class classifier (SMB1 / SMB2 / SMB3) · EfficientNet-B0 fine-tuned on self-collected NES gameplay footage."
     )
 
 if __name__ == "__main__":
