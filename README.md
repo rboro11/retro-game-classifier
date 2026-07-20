@@ -10,7 +10,7 @@ This repository contains a local-runtime workflow for building datasets, trainin
 
 ## Project phases
 
-The long-term roadmap is broader than the current 3-class image model and includes visual, audio, video, and multi-modal stages.[file:494][file:495] The original project plan outlines six phases, starting from a binary screenshot classifier and expanding toward a larger multi-modal Mario identifier.[file:494]
+The long-term roadmap is broader than the current 3-class image model and includes visual, audio, video, and multi-modal stages. The original project plan outlines six phases, starting from a binary screenshot classifier and expanding toward a larger multi-modal Mario identifier.[file:494]
 
 | Phase | Task | Models | Data needed |
 |---|---|---|---|
