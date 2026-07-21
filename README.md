@@ -17,10 +17,10 @@ The long-term roadmap is broader than the current 3-class image model and includ
 | Phase | Task | Models | Data needed |
 |---|---|---|---|
 | 1 | Binary NES classifier | Custom CNN | SMB1 (public) + SMB3 (your captures) |
-| 2 | 3–5 game NES classifier | CNN, ResNet-18, EfficientNet-B0 | SMB1 (public) + SMB2/3 (your captures) |
-| 3 | 10–20 game multi-era classifier | ResNet-50, EfficientNet-B3, ViT-B/16 | MobyGames API + your captures |
-| 4 | Audio classifier | Spectrogram CNN, transfer models | NES-MDB + your OST rips |
-| 5 | Video classifier | CNN+LSTM, 3D-ResNet, temporal models | NES-VMDB + your recordings |
+| 2 | 3–5 game NES classifier | CNN, ResNet-18, EfficientNet-B0 | SMB1 (public) + SMB2/3 (self captures) |
+| 3 | 10–20 game multi-era classifier | ResNet-50, EfficientNet-B3, ViT-B/16 | MobyGames API + self captures |
+| 4 | Audio classifier | Spectrogram CNN, transfer models | NES-MDB + self OST rips |
+| 5 | Video classifier | CNN+LSTM, 3D-ResNet, temporal models | NES-VMDB + self recordings |
 | 6 | Multi-modal fusion | Late fusion / attention fusion | Combined image + audio + video assets |
 
 ## Current build
