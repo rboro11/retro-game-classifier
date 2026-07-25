@@ -366,3 +366,40 @@ def parse_args():
     ap.add_argument("--target_frames_per_class", type=int, default=None,
                     help="If set for --mode frames, compute fps per class from total runtime to target this many frames across the class")
     return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    ensure_dirs()
+
+    if args.mode in ["frames", "all"]:
+        if args.classes and args.target_frames_per_class:
+            for cls in args.classes:
+                class_dir = RAW_DIR / cls
+                fps = compute_runtime_scaled_fps(class_dir, args.target_frames_per_class)
+                if fps is None:
+                    fps = args.fps
+                    print(f"[frames] {cls}: could not compute runtime-scaled fps, falling back to --fps {fps}")
+                else:
+                    print(f"[frames] {cls}: runtime-scaled fps = {fps:.6f} for target {args.target_frames_per_class}")
+                extract_frames(fps=fps, classes=[cls])
+        else:
+            extract_frames(fps=args.fps, classes=args.classes)
+
+    if args.mode in ["audio", "all"]:
+        print("[audio] mode selected, but audio extraction is not implemented in this script yet.")
+
+    if args.mode in ["spectrograms", "all"]:
+        print("[spectrograms] mode selected, but spectrogram generation is not implemented in this script yet.")
+
+    if args.mode in ["splits", "all"]:
+        build_splits(
+            val_ratio=args.val_ratio,
+            test_ratio=args.test_ratio,
+            max_per_class=args.max_per_class,
+        )
+
+
+if __name__ == "__main__":
+    main()
+
