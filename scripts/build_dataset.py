@@ -4,69 +4,142 @@ build_dataset.py — plug-and-play dataset builder
 Run this ONCE after dropping raw files into data/raw/<ClassName>/
 
 Usage:
-    python scripts/build_dataset.py --mode frames    # extract frames from MP4s only (no image copy)
-    python scripts/build_dataset.py --mode audio     # extract .wav from MP4s
-    python scripts/build_dataset.py --mode spectrograms  # generate mel-specs
-    python scripts/build_dataset.py --mode splits    # create train/val/test CSVs
-    python scripts/build_dataset.py --mode all       # run everything
+    python scripts/build_dataset.py --mode frames
+    python scripts/build_dataset.py --mode frames --fps 0.3
+    python scripts/build_dataset.py --mode frames --classes SMB2 SMB3
+    python scripts/build_dataset.py --mode frames --classes SMB2 --target_frames_per_class 1000
+    python scripts/build_dataset.py --mode audio
+    python scripts/build_dataset.py --mode spectrograms
+    python scripts/build_dataset.py --mode splits
+    python scripts/build_dataset.py --mode splits --max_per_class 1000
+    python scripts/build_dataset.py --mode all
 
-NOTE on disk usage:
-    Raw images (PNG/JPG) in data/raw/<Class>/ are referenced DIRECTLY in the
-    split CSVs — they are never copied into data/processed/.
-    Only video-extracted frames land in data/processed/frames/.
+Core arguments:
+    --mode {frames,audio,spectrograms,splits,all}
+        Which stage(s) to run.
 
-NOTE on class imbalance:
-    Use --max_per_class N to cap any class at N samples (random, seeded).
-    Example: python scripts/build_dataset.py --mode splits --max_per_class 5000
-    Also pass --weighted_loss to print the loss weights for use in training.
+    --fps FLOAT
+        Fixed extraction rate for video-to-frame conversion.
+        Example: --fps 0.3 extracts about one frame every 3.33 seconds.
 
-NOTE on split strategies (three tiers):
+    --classes CLASS [CLASS ...]
+        Optional subset of class folders to process.
+        Example: --classes SMB2 SMB3
 
-  1. SUBDIRECTORY LAYOUT (e.g. SMB1 organised by level folder 1-1/, 8-2/ …)
-     Split at the subdirectory (session) level via _session_level_split().
-     All frames from one session go to exactly one split.
+    --target_frames_per_class INT
+        Runtime-aware frame extraction target.
+        Instead of using one fixed FPS for every class, the script computes
+        a per-class FPS from total video runtime so the class ends up with
+        about this many extracted frames across its full playthrough(s).
+        Example: --classes SMB2 --target_frames_per_class 1000
 
-  2. FLAT FRAME LAYOUT with _fNNNNN naming (e.g. SMB3_1_cropped_f00042.png)
-     Frames were extracted from named video clips.  Split at the SOURCE VIDEO
-     STEM level via _video_stem_split() — all frames from one clip go to
-     exactly one split.  This prevents near-identical consecutive frames from
-     leaking across train/val/test even when the files sit in a flat folder.
+    --clip_duration FLOAT
+        Duration used by audio/spectrogram-related steps where applicable.
 
-     SINGLE-SOURCE FALLBACK: When only one (or too few) video clips are
-     present to fill all three splits, _video_stem_split() automatically
-     falls back to a CHRONOLOGICAL FRAME-LEVEL split.  Frames are sorted by
-     filename (the _fNNNNN suffix encodes time), then sliced sequentially:
-       • test  → first  test_ratio  portion  (early frames)
-       • val   → next   val_ratio   portion  (middle frames)
-       • train → remainder                   (later frames)
-     This avoids crashes and manual Session-folder workarounds while still
-     producing a meaningful temporal holdout from a single source video.
+    --val_ratio FLOAT
+        Validation split ratio.
 
-  3. FLAT LAYOUT without _fNNNNN naming (generic image classes)
-     Split per-file as before.
+    --test_ratio FLOAT
+        Test split ratio.
+
+    --max_per_class INT
+        Cap each class at this many samples during split generation
+        (0 = no cap).
+        Recommended: set to about the size of your smallest class, or
+        slightly above it, to reduce imbalance without throwing away too much.
+
+Disk-usage behavior:
+    Raw images (PNG/JPG/etc.) placed in data/raw/<Class>/ are referenced
+    directly in the split CSVs and are not copied into data/processed/.
+    Only frames extracted from videos are written into:
+        data/processed/frames/<Class>/
+
+Why use --target_frames_per_class:
+    This is useful when one class is represented by a full gameplay video and
+    you want roughly N samples distributed across the entire playthrough.
+    Example:
+        python scripts/build_dataset.py --mode frames --classes SMB2 --target_frames_per_class 1000
+    For a shorter video, the computed FPS will be higher.
+    For a longer video, the computed FPS will be lower.
+
+Split strategy notes:
+    1. Subdirectory layout:
+       If a class is organized into subfolders (for example by level, run,
+       or session), the script can split at the subdirectory/session level so
+       near-duplicate neighboring frames stay together.
+
+    2. Flat frame layout with _fNNNNN naming:
+       If files are named like:
+           SMB3_1_cropped_f00042.png
+       the script can group by source video stem and split by clip instead of
+       by individual frame, which helps prevent leakage across train/val/test.
+
+    3. Single-video fallback:
+       If only one source clip exists for a class, clip-level splitting is not
+       enough to populate all three splits. In that case, the script can fall
+       back to a chronological frame-level split based on filename order:
+           test  = early frames
+           val   = middle frames
+           train = later frames
+
+    4. Generic flat image layout:
+       If there are no session folders and no _fNNNNN naming pattern, files
+       are split at the individual image level.
+
+Recommended examples:
+    Fixed FPS for all available classes:
+        python scripts/build_dataset.py --mode frames --fps 0.3
+
+    Runtime-aware extraction for one class:
+        python scripts/build_dataset.py --mode frames --classes SMB2 --target_frames_per_class 1000
+
+    Build balanced splits after extraction:
+        python scripts/build_dataset.py --mode splits --max_per_class 1000
+
+Typical local-runtime workflow:
+    1. Place raw source data under data/raw/<Class>/
+    2. Run frame extraction
+    3. Run split generation
+    4. Train/evaluate/export from the generated CSVs
+
+Notes:
+    - If a class contains only images and no videos, --mode frames will skip
+      video extraction for that class.
+    - If a class contains no detectable video runtime, the script can fall
+      back to the value passed via --fps.
+    - This workflow aligns with the current Colab notebook pattern that builds
+      frames first, then builds splits locally. 
 """
 
 import os
+import re
+import csv
+import math
+import random
 import argparse
 import subprocess
-import random
-import math
-
 from collections import defaultdict
 from pathlib import Path
+
 import pandas as pd
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent.parent
-RAW_DIR    = ROOT / "data" / "raw"
+RAW_DIR = ROOT / "data" / "raw"
 FRAMES_DIR = ROOT / "data" / "processed" / "frames"
-AUDIO_DIR  = ROOT / "data" / "processed" / "audio"
-SPECS_DIR  = ROOT / "data" / "processed" / "spectrograms"
+AUDIO_DIR = ROOT / "data" / "processed" / "audio"
+SPECS_DIR = ROOT / "data" / "processed" / "spectrograms"
 SPLITS_DIR = ROOT / "data" / "processed" / "splits"
 
-IMG_EXTS   = {".png", ".jpg", ".jpeg", ".bmp"}
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
+FRAME_RE = re.compile(r"_f(\d+)\\.[A-Za-z0-9]+$")
+
+
+def ensure_dirs():
+    for p in [FRAMES_DIR, AUDIO_DIR, SPECS_DIR, SPLITS_DIR]:
+        p.mkdir(parents=True, exist_ok=True)
 
 
 def find_video_files(class_dir: Path):
@@ -94,10 +167,6 @@ def compute_runtime_scaled_fps(class_dir: Path, target_frames: int) -> float | N
     return max(target_frames / total_seconds, 0.0001)
 
 
-# ─────────────────────────────────────────────
-# GPU detection helper
-# ─────────────────────────────────────────────
-
 def _gpu_available() -> bool:
     try:
         import torch
@@ -114,23 +183,21 @@ def _ffmpeg_hwaccel_args() -> list:
     return []
 
 
-# ─────────────────────────────────────────────
-# Frame extraction (ffmpeg — videos only)
-# ─────────────────────────────────────────────
-
-def extract_frames(fps: float = 1.0):
-    """
-    Extract frames from video files only. Raw images are NOT copied.
-    Output: data/processed/frames/<ClassName>/<videoname>_f<N>.png
-    """
+def extract_frames(fps: float = 1.0, classes: list[str] | None = None):
     print(f"\n[extract_frames] FPS = {fps}  (images skipped — referenced directly from raw/)")
     hw_args = _ffmpeg_hwaccel_args()
 
-    for class_dir in sorted(RAW_DIR.iterdir()):
-        if not class_dir.is_dir():
-            continue
+    if not RAW_DIR.exists():
+        raise FileNotFoundError(f"Missing raw data directory: {RAW_DIR}")
 
-        videos = [f for f in class_dir.rglob("*") if f.suffix.lower() in VIDEO_EXTS]
+    class_dirs = sorted([p for p in RAW_DIR.iterdir() if p.is_dir()])
+    if classes:
+        wanted = set(classes)
+        class_dirs = [p for p in class_dirs if p.name in wanted]
+
+    total = 0
+    for class_dir in class_dirs:
+        videos = find_video_files(class_dir)
         if not videos:
             print(f"  {class_dir.name}: no videos found, skipping.")
             continue
@@ -141,569 +208,161 @@ def extract_frames(fps: float = 1.0):
         for vid_file in videos:
             stem = vid_file.stem
             output = str(out_dir / f"{stem}_f%05d.png")
-
-            existing = list(out_dir.glob(f"{stem}_f*.png"))
-            if existing:
-                print(f"  Skipping {vid_file.name} ({len(existing)} frames already exist)")
-                continue
-
-            cmd = (
-                ["ffmpeg", "-y"]
-                + hw_args
-                + ["-i", str(vid_file), "-vf", f"fps={fps}",
-                   "-q:v", "2", output, "-hide_banner", "-loglevel", "error"]
-            )
-
-            print(f"  Extracting {vid_file.name} → {out_dir.name}/")
-            try:
-                subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError:
-                if hw_args:
-                    print(f"  Warning: hwaccel failed for {vid_file.name}, retrying on CPU...")
-                    cmd_cpu = (
-                        ["ffmpeg", "-y"]
-                        + ["-i", str(vid_file), "-vf", f"fps={fps}",
-                           "-q:v", "2", output, "-hide_banner", "-loglevel", "error"]
-                    )
-                    try:
-                        subprocess.run(cmd_cpu, check=True)
-                    except subprocess.CalledProcessError as e2:
-                        print(f"  ERROR: {vid_file.name}: {e2}")
-                else:
-                    print(f"  ERROR: Could not extract frames from {vid_file.name}")
-
-    total = sum(1 for _ in FRAMES_DIR.rglob("*.png")) if FRAMES_DIR.exists() else 0
-    print(f"  Done. Total video-extracted frames: {total:,}")
+            print(f"  Extracting {vid_file.name} → {class_dir.name}/ at {fps:.4f} fps")
+            cmd = ["ffmpeg", "-y", *hw_args, "-i", str(vid_file), "-vf", f"fps={fps}", output]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            total += len(list(out_dir.glob(f"{stem}_f*.png")))
+    print(f"  Done. Total video-extracted frames: {total}")
 
 
-# ─────────────────────────────────────────────
-# Audio extraction (ffmpeg)
-# ─────────────────────────────────────────────
-
-def extract_audio(clip_duration: float = 10.0):
-    """
-    Extract audio clips from MP4s at fixed clip_duration intervals.
-    Output: data/processed/audio/<ClassName>/<file>_clip<N>.wav
-    """
-    print(f"\n[extract_audio] Clip duration = {clip_duration}s")
-    for class_dir in sorted(RAW_DIR.iterdir()):
-        if not class_dir.is_dir():
-            continue
-        out_dir = AUDIO_DIR / class_dir.name
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        for aud_file in class_dir.glob("*"):
-            if aud_file.suffix.lower() in AUDIO_EXTS:
-                dest = out_dir / (aud_file.stem + ".wav")
-                if not dest.exists():
-                    cmd = ["ffmpeg", "-y", "-i", str(aud_file),
-                           "-ar", "22050", "-ac", "1",
-                           str(dest), "-loglevel", "error"]
-                    subprocess.run(cmd, check=True)
-
-        for vid_file in class_dir.rglob("*"):
-            if vid_file.suffix.lower() not in VIDEO_EXTS:
-                continue
-            dur_cmd = ["ffprobe", "-v", "error",
-                       "-show_entries", "format=duration",
-                       "-of", "default=noprint_wrappers=1:nokey=1",
-                       str(vid_file)]
-            try:
-                result = subprocess.run(dur_cmd, capture_output=True, text=True)
-                duration = float(result.stdout.strip())
-            except Exception:
-                duration = 60.0
-
-            n_clips = max(1, int(duration / clip_duration))
-            for i in range(n_clips):
-                start = i * clip_duration
-                out_path = out_dir / f"{vid_file.stem}_clip{i:04d}.wav"
-                if out_path.exists():
-                    continue
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(start), "-i", str(vid_file),
-                    "-t", str(clip_duration),
-                    "-ar", "22050", "-ac", "1",
-                    str(out_path), "-loglevel", "error",
-                ]
-                subprocess.run(cmd, check=True)
-            print(f"  {vid_file.name}: {n_clips} clips → {out_dir.name}/")
-
-    total = sum(1 for _ in AUDIO_DIR.rglob("*.wav"))
-    print(f"  Done. Total audio clips: {total:,}")
+def _video_stem(path: Path) -> str:
+    m = FRAME_RE.search(path.name)
+    if m:
+        return path.name[:m.start()]
+    return path.stem
 
 
-# ─────────────────────────────────────────────
-# Mel-spectrogram PNG generation
-# ─────────────────────────────────────────────
-
-def generate_spectrograms():
-    try:
-        import librosa
-        import numpy as np
-        from PIL import Image
-    except ImportError:
-        print("Install librosa: pip install librosa")
-        return
-
-    import matplotlib
-    matplotlib.use("Agg")
-
-    print("\n[generate_spectrograms]")
-    if not AUDIO_DIR.exists():
-        print("  No audio directory found. Run --mode audio first.")
-        return
-
-    for class_dir in sorted(AUDIO_DIR.iterdir()):
-        if not class_dir.is_dir():
-            continue
-        out_dir = SPECS_DIR / class_dir.name
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        for wav_file in tqdm(list(class_dir.glob("*.wav")),
-                             desc=class_dir.name, leave=False):
-            dest = out_dir / (wav_file.stem + ".png")
-            if dest.exists():
-                continue
-            try:
-                y, sr = librosa.load(str(wav_file), sr=22050, mono=True)
-                mel = librosa.feature.melspectrogram(
-                    y=y, sr=sr, n_fft=1024, hop_length=512, n_mels=128)
-                mel_db = librosa.power_to_db(mel, ref=np.max)
-                mel_norm = ((mel_db - mel_db.min()) /
-                            (mel_db.max() - mel_db.min() + 1e-8) * 255).astype("uint8")
-                Image.fromarray(mel_norm).save(dest)
-            except Exception as e:
-                print(f"  Warning: could not process {wav_file.name}: {e}")
-
-    total = sum(1 for _ in SPECS_DIR.rglob("*.png"))
-    print(f"  Done. Total spectrograms: {total:,}")
+def _frame_index(path: Path) -> int:
+    m = FRAME_RE.search(path.name)
+    return int(m.group(1)) if m else -1
 
 
-# ─────────────────────────────────────────────
-# Split helpers
-# ─────────────────────────────────────────────
-
-def _has_subdirectory_layout(class_dir: Path) -> bool:
-    """
-    Return True when a class directory organises images into subdirectories
-    (e.g. SMB1/1-1/, SMB1/8-2/).  Split at the subdirectory level.
-    """
-    return any(p.is_dir() for p in class_dir.iterdir())
-
-
-def _has_video_frame_naming(class_dir: Path) -> bool:
-    """
-    Return True when flat image files follow the <stem>_fNNNNN.ext naming
-    convention produced by extract_frames() — i.e. frames came from named
-    video clips (e.g. SMB3_1_cropped_f00042.png).  These must be grouped by
-    source-video stem before splitting.
-    """
-    for f in class_dir.iterdir():
-        if f.suffix.lower() in IMG_EXTS and "_f" in f.stem:
-            return True
-    return False
-
-
-def _video_stem_split(
-    class_dir: Path,
-    label: str,
-    val_ratio: float,
-    test_ratio: float,
-    seed: int,
-    max_per_class: int,
-) -> tuple[list, list, list]:
-    """
-    Group flat frames by source-video stem (prefix before the last '_f' token),
-    shuffle those groups, then assign whole groups to train/val/test.
-
-    Example:
-        SMB3_1_cropped_f00001.png  =>  group 'SMB3_1_cropped'
-        SMB3_2_cropped_f00001.png  =>  group 'SMB3_2_cropped'
-
-    All frames from one clip land in exactly one split.
-
-    SINGLE-SOURCE FALLBACK
-    ----------------------
-    When there are too few groups to populate all three splits (i.e. fewer
-    than 3 distinct video stems), the function falls back to a chronological
-    frame-level split instead of crashing.  Frames are sorted by filename
-    (the _fNNNNN suffix encodes recording time) and sliced sequentially:
-        test  → first  test_ratio  portion   (early frames)
-        val   → next   val_ratio   portion   (middle frames)
-        train → remainder                    (later frames)
-    A WARNING is printed so the caller knows the fallback was triggered.
-
-    Returns (train_records, val_records, test_records).
-    """
+def _session_level_split(files, val_ratio=0.15, test_ratio=0.15, seed=42):
+    groups = defaultdict(list)
+    for p in files:
+        rel = p.parent.name
+        groups[rel].append(p)
+    sessions = list(groups.keys())
     rng = random.Random(seed)
-
-    groups: dict[str, list] = defaultdict(list)
-    for f in sorted(class_dir.iterdir()):
-        if f.suffix.lower() not in IMG_EXTS:
-            continue
-        # Everything before the last '_f' is the source-video stem
-        parts = f.stem.rsplit("_f", 1)
-        group_id = parts[0] if len(parts) == 2 else f.stem
-        groups[group_id].append(f)
-
-    if not groups:
-        return [], [], []
-
-    group_names = sorted(groups.keys())
-    min_groups_needed = 3  # need at least one group per split
-
-    # ── SINGLE-SOURCE FALLBACK ───────────────────────────────────────────
-    if len(group_names) < min_groups_needed:
-        print(
-            f"  WARNING [{label}]: only {len(group_names)} video clip(s) detected — "
-            f"not enough to fill train/val/test at the clip level.\n"
-            f"  Falling back to CHRONOLOGICAL FRAME-LEVEL split "
-            f"(sorted by filename, sliced sequentially).\n"
-            f"  test={test_ratio:.0%} of early frames | "
-            f"val={val_ratio:.0%} of middle frames | "
-            f"train=remainder of later frames."
-        )
-        # Collect all frames sorted by filename (encodes time via _fNNNNN)
-        all_frames = sorted(
-            [f for f in class_dir.iterdir() if f.suffix.lower() in IMG_EXTS],
-            key=lambda f: f.name,
-        )
-        n_total = len(all_frames)
-        n_test  = max(1, int(n_total * test_ratio))
-        n_val   = max(1, int(n_total * val_ratio))
-
-        test_frames  = all_frames[:n_test]
-        val_frames   = all_frames[n_test:n_test + n_val]
-        train_frames = all_frames[n_test + n_val:]
-
-        def _frames_to_records(flist):
-            return [{"filepath": str(f), "label": label, "modality": "image"} for f in flist]
-
-        train_recs = _frames_to_records(train_frames)
-        val_recs   = _frames_to_records(val_frames)
-        test_recs  = _frames_to_records(test_frames)
-
-        if max_per_class > 0 and n_total > max_per_class:
-            scale = max_per_class / n_total
-            train_recs = rng.sample(train_recs, max(1, int(len(train_recs) * scale)))
-            val_recs   = rng.sample(val_recs,   max(1, int(len(val_recs)   * scale)))
-            test_recs  = rng.sample(test_recs,  max(1, int(len(test_recs)  * scale)))
-
-        print(
-            f"  [frame-level-fallback] {label}: {n_total:,} frames "
-            f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})"
-        )
-        print(f"    Clips present ({len(group_names)}): {group_names}")
-        return train_recs, val_recs, test_recs
-
-    # ── NORMAL CLIP-LEVEL SPLIT ──────────────────────────────────────────
-    rng.shuffle(group_names)
-
-    n = len(group_names)
-    n_test  = max(1, int(n * test_ratio))
-    n_val   = max(1, int(n * val_ratio))
-
-    test_groups  = group_names[:n_test]
-    val_groups   = group_names[n_test:n_test + n_val]
-    train_groups = group_names[n_test + n_val:]
-
-    def _to_records(g_list):
-        recs = []
-        for g in g_list:
-            for f in groups[g]:
-                recs.append({"filepath": str(f), "label": label, "modality": "image"})
-        return recs
-
-    train_recs = _to_records(train_groups)
-    val_recs   = _to_records(val_groups)
-    test_recs  = _to_records(test_groups)
-
-    n_total = len(train_recs) + len(val_recs) + len(test_recs)
-
-    if max_per_class > 0 and n_total > max_per_class:
-        scale = max_per_class / n_total
-        train_recs = rng.sample(train_recs, max(1, int(len(train_recs) * scale)))
-        val_recs   = rng.sample(val_recs,   max(1, int(len(val_recs)   * scale)))
-        test_recs  = rng.sample(test_recs,  max(1, int(len(test_recs)  * scale)))
-        print(f"  [video-stem-split] {label}: {n_total:,} frames across {n} clips "
-              f"\u2192 capped to ~{max_per_class:,}  "
-              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
-    else:
-        print(f"  [video-stem-split] {label}: {n_total:,} frames across {n} clips  "
-              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
-
-    print(f"    Test clips  ({len(test_groups)}): {test_groups}")
-    print(f"    Val  clips  ({len(val_groups)}):  {val_groups}")
-    print(f"    Train clips ({len(train_groups)}): {train_groups}")
-
-    return train_recs, val_recs, test_recs
+    rng.shuffle(sessions)
+    n = len(sessions)
+    n_test = max(1, round(n * test_ratio)) if n >= 3 else max(0, round(n * test_ratio))
+    n_val = max(1, round(n * val_ratio)) if n >= 3 else max(0, round(n * val_ratio))
+    test_sessions = set(sessions[:n_test])
+    val_sessions = set(sessions[n_test:n_test + n_val])
+    train_sessions = set(sessions[n_test + n_val:])
+    train = [p for s in train_sessions for p in groups[s]]
+    val = [p for s in val_sessions for p in groups[s]]
+    test = [p for s in test_sessions for p in groups[s]]
+    return train, val, test
 
 
-def _session_level_split(
-    class_dir: Path,
-    label: str,
-    val_ratio: float,
-    test_ratio: float,
-    seed: int,
-    max_per_class: int,
-) -> tuple[list, list, list]:
-    """
-    Group images by immediate subdirectory (session), shuffle the SESSION
-    list, then assign whole sessions to train/val/test in ratio.
-    Returns (train_records, val_records, test_records).
-    """
+def _video_stem_split(files, val_ratio=0.15, test_ratio=0.15, seed=42):
+    groups = defaultdict(list)
+    for p in files:
+        groups[_video_stem(p)].append(p)
+    stems = list(groups.keys())
+
+    if len(stems) < 3:
+        ordered = sorted(files, key=lambda p: (_video_stem(p), _frame_index(p), p.name))
+        n = len(ordered)
+        n_test = max(1, round(n * test_ratio)) if n >= 3 else max(0, round(n * test_ratio))
+        n_val = max(1, round(n * val_ratio)) if n >= 3 else max(0, round(n * val_ratio))
+        test = ordered[:n_test]
+        val = ordered[n_test:n_test + n_val]
+        train = ordered[n_test + n_val:]
+        print("  WARNING: only", len(stems), "video clips detected; falling back to chronological frame-level split.")
+        return train, val, test
+
     rng = random.Random(seed)
+    rng.shuffle(stems)
+    n = len(stems)
+    n_test = max(1, round(n * test_ratio))
+    n_val = max(1, round(n * val_ratio))
+    test_stems = set(stems[:n_test])
+    val_stems = set(stems[n_test:n_test + n_val])
+    train_stems = set(stems[n_test + n_val:])
+    train = [p for s in train_stems for p in groups[s]]
+    val = [p for s in val_stems for p in groups[s]]
+    test = [p for s in test_stems for p in groups[s]]
+    return train, val, test
 
-    sessions: dict[str, list] = {}
-    for sub in sorted(class_dir.iterdir()):
-        if not sub.is_dir():
-            continue
-        imgs = [f for f in sub.rglob("*") if f.suffix.lower() in IMG_EXTS]
-        if imgs:
-            sessions[sub.name] = imgs
 
-    if not sessions:
-        return [], [], []
+def _generic_file_split(files, val_ratio=0.15, test_ratio=0.15, seed=42):
+    files = list(files)
+    rng = random.Random(seed)
+    rng.shuffle(files)
+    n = len(files)
+    n_test = round(n * test_ratio)
+    n_val = round(n * val_ratio)
+    test = files[:n_test]
+    val = files[n_test:n_test + n_val]
+    train = files[n_test + n_val:]
+    return train, val, test
 
-    session_names = sorted(sessions.keys())
-    rng.shuffle(session_names)
 
-    n = len(session_names)
-    n_test = max(1, int(n * test_ratio))
-    n_val  = max(1, int(n * val_ratio))
+def build_splits(val_ratio=0.15, test_ratio=0.15, max_per_class=0, seed=42):
+    ensure_dirs()
+    classes = []
+    train_rows, val_rows, test_rows = [], [], []
 
-    test_sessions  = session_names[:n_test]
-    val_sessions   = session_names[n_test:n_test + n_val]
-    train_sessions = session_names[n_test + n_val:]
-
-    def _to_records(sess_list):
-        recs = []
-        for s in sess_list:
-            for f in sessions[s]:
-                recs.append({"filepath": str(f), "label": label, "modality": "image"})
-        return recs
-
-    train_recs = _to_records(train_sessions)
-    val_recs   = _to_records(val_sessions)
-    test_recs  = _to_records(test_sessions)
-
-    n_total = len(train_recs) + len(val_recs) + len(test_recs)
-
-    if max_per_class > 0 and n_total > max_per_class:
-        scale = max_per_class / n_total
-        train_recs = rng.sample(train_recs, max(1, int(len(train_recs) * scale)))
-        val_recs   = rng.sample(val_recs,   max(1, int(len(val_recs)   * scale)))
-        test_recs  = rng.sample(test_recs,  max(1, int(len(test_recs)  * scale)))
-        print(f"  [session-split] {label}: {n_total:,} frames across {n} sessions "
-              f"\u2192 capped to ~{max_per_class:,}  "
-              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
+    if RAW_DIR.exists():
+        raw_classes = {p.name for p in RAW_DIR.iterdir() if p.is_dir()}
     else:
-        print(f"  [session-split] {label}: {n_total:,} frames across {n} sessions  "
-              f"(train={len(train_recs):,} val={len(val_recs):,} test={len(test_recs):,})")
+        raw_classes = set()
+    frame_classes = {p.name for p in FRAMES_DIR.iterdir() if p.is_dir()} if FRAMES_DIR.exists() else set()
+    class_names = sorted(raw_classes | frame_classes)
 
-    print(f"    Test sessions  ({len(test_sessions)}): {test_sessions[:5]}"
-          f"{'...' if len(test_sessions) > 5 else ''}")
-    print(f"    Val  sessions  ({len(val_sessions)}):  {val_sessions[:5]}"
-          f"{'...' if len(val_sessions) > 5 else ''}")
-    print(f"    Train sessions ({len(train_sessions)}): {train_sessions[:5]}"
-          f"{'...' if len(train_sessions) > 5 else ''}")
+    for label_idx, cls in enumerate(class_names):
+        raw_cls = RAW_DIR / cls
+        frame_cls = FRAMES_DIR / cls
+        files = []
+        if frame_cls.exists():
+            files.extend([p for p in frame_cls.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS])
+        if raw_cls.exists():
+            files.extend([p for p in raw_cls.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXTS])
+        files = sorted(set(files))
+        if not files:
+            continue
 
-    return train_recs, val_recs, test_recs
+        classes.append((cls, label_idx))
 
+        subdirs = {p.parent.relative_to(raw_cls).parts[0] for p in files if raw_cls.exists() and p.is_relative_to(raw_cls) and len(p.parent.relative_to(raw_cls).parts) > 0}
+        has_sessions = len(subdirs) > 1
+        has_frame_naming = any(FRAME_RE.search(p.name) for p in files)
 
-def _collect_image_records(class_dir: Path, label: str) -> list:
-    """Flat per-file collection (no grouping)."""
-    return [
-        {"filepath": str(f), "label": label, "modality": "image"}
-        for f in class_dir.rglob("*")
-        if f.suffix.lower() in IMG_EXTS
-    ]
+        if has_sessions:
+            train, val, test = _session_level_split(files, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed)
+        elif has_frame_naming:
+            train, val, test = _video_stem_split(files, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed)
+        else:
+            train, val, test = _generic_file_split(files, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed)
 
+        if max_per_class and max_per_class > 0:
+            rng = random.Random(seed)
+            def cap(xs):
+                xs = list(xs)
+                if len(xs) <= max_per_class:
+                    return xs
+                rng.shuffle(xs)
+                return xs[:max_per_class]
+            train, val, test = cap(train), cap(val), cap(test)
 
-# ─────────────────────────────────────────────
-# Train / Val / Test splits
-# ─────────────────────────────────────────────
+        for split_name, rows, xs in [("train", train_rows, train), ("val", val_rows, val), ("test", test_rows, test)]:
+            for p in xs:
+                rows.append({"filepath": str(p), "label": cls, "label_idx": label_idx, "split": split_name})
 
-def build_splits(
-    val_ratio: float = 0.15,
-    test_ratio: float = 0.15,
-    seed: int = 42,
-    max_per_class: int = 0,
-):
-    """
-    Build train.csv / val.csv / test.csv.
-
-    Source priority per class (no double-counting):
-      • If data/processed/frames/<Class>/ exists  → use processed frames
-      • Otherwise                                 → use data/raw/<Class>/ directly
-
-    Split strategy (auto-detected per class):
-      1. Subdirectory layout   → _session_level_split()   (e.g. SMB1)
-      2. Flat + _fNNNNN names  → _video_stem_split()      (e.g. SMB3 clips)
-         └─ single-source fallback → chronological frame-level split
-      3. Flat generic images   → per-file shuffle split
-
-    Each CSV row: filepath, label, label_idx, modality
-    """
     SPLITS_DIR.mkdir(parents=True, exist_ok=True)
-    random.seed(seed)
-
-    raw_classes    = {d.name for d in RAW_DIR.iterdir()    if d.is_dir()} if RAW_DIR.exists()    else set()
-    frames_classes = {d.name for d in FRAMES_DIR.iterdir() if d.is_dir()} if FRAMES_DIR.exists() else set()
-    all_classes    = raw_classes | frames_classes
-
-    all_train, all_val, all_test = [], [], []
-    all_records = []
-
-    for cls in sorted(all_classes):
-        frames_dir = FRAMES_DIR / cls
-        raw_dir    = RAW_DIR    / cls
-
-        if frames_dir.exists() and any(frames_dir.rglob("*")):
-            source_dir = frames_dir
-            source     = "video frames"
-        elif raw_dir.exists():
-            source_dir = raw_dir
-            source     = "raw images"
-        else:
-            print(f"  WARNING: no data found for class '{cls}', skipping.")
-            continue
-
-        # ── Tier 1: subdirectory (session) layout ────────────────────────
-        if _has_subdirectory_layout(source_dir):
-            tr, va, te = _session_level_split(
-                source_dir, cls, val_ratio, test_ratio, seed, max_per_class
-            )
-
-        # ── Tier 2: flat folder with _fNNNNN frame naming ────────────────
-        elif _has_video_frame_naming(source_dir):
-            tr, va, te = _video_stem_split(
-                source_dir, cls, val_ratio, test_ratio, seed, max_per_class
-            )
-
-        # ── Tier 3: generic flat image class ────────────────────────────
-        else:
-            cls_records = _collect_image_records(source_dir, cls)
-            n_raw = len(cls_records)
-            if max_per_class > 0 and n_raw > max_per_class:
-                cls_records = random.sample(cls_records, max_per_class)
-                print(f"  [{source}] {cls}: {n_raw:,} → capped at {max_per_class:,}")
-            else:
-                print(f"  [{source}] {cls}: {n_raw:,} files")
-            random.shuffle(cls_records)
-            n = len(cls_records)
-            n_test = max(1, int(n * test_ratio))
-            n_val  = max(1, int(n * val_ratio))
-            te = cls_records[:n_test]
-            va = cls_records[n_test:n_test + n_val]
-            tr = cls_records[n_test + n_val:]
-
-        all_train.extend(tr)
-        all_val.extend(va)
-        all_test.extend(te)
-        all_records.extend(tr + va + te)
-
-    # ── Audio clips (additive, no overlap with images) ───────────────────
-    if AUDIO_DIR.exists():
-        for class_dir in sorted(AUDIO_DIR.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            wavs = list(class_dir.glob("*.wav"))
-            for f in wavs:
-                rec = {"filepath": str(f), "label": class_dir.name, "modality": "audio"}
-                all_records.append(rec)
-                r = random.random()
-                if r < test_ratio:
-                    all_test.append(rec)
-                elif r < test_ratio + val_ratio:
-                    all_val.append(rec)
-                else:
-                    all_train.append(rec)
-            if wavs:
-                print(f"  [audio] {class_dir.name}: {len(wavs):,} clips")
-
-    if not all_records:
-        print("No data found. Check data/raw/ and data/processed/.")
-        return
-
-    df_all = pd.DataFrame(all_records)
-    classes = sorted(df_all["label"].unique())
-    class_to_idx = {c: i for i, c in enumerate(classes)}
-    df_all["label_idx"] = df_all["label"].map(class_to_idx)
-
-    print("\n  Class distribution:")
-    counts = df_all["label"].value_counts().sort_index()
-    total  = len(df_all)
-    for cls, n in counts.items():
-        print(f"    {cls}: {n:,}  ({n/total*100:.1f}%)")
-
-    max_count = counts.max()
-    weights   = {cls: round(max_count / n, 4) for cls, n in counts.items()}
-    print(f"\n  Suggested CrossEntropyLoss weights (inverse-frequency):")
-    print(f"    {weights}")
-    print(f"  Usage: loss_fn = nn.CrossEntropyLoss(weight=torch.tensor([{', '.join(str(weights[c]) for c in sorted(weights))}]))")
-
-    def _label_idx(rows):
-        df = pd.DataFrame(rows)
-        df["label_idx"] = df["label"].map(class_to_idx)
-        return df.reset_index(drop=True)
-
-    train_df = _label_idx(all_train)
-    val_df   = _label_idx(all_val)
-    test_df  = _label_idx(all_test)
-
-    train_df.to_csv(SPLITS_DIR / "train.csv", index=False)
-    val_df.to_csv(  SPLITS_DIR / "val.csv",   index=False)
-    test_df.to_csv( SPLITS_DIR / "test.csv",  index=False)
-
-    pd.DataFrame({"label": classes, "label_idx": range(len(classes))}).to_csv(
-        SPLITS_DIR / "classes.csv", index=False
-    )
-
-    pd.DataFrame([
-        {"label": cls, "label_idx": class_to_idx[cls], "loss_weight": weights[cls]}
-        for cls in classes
-    ]).to_csv(SPLITS_DIR / "class_weights.csv", index=False)
-    print(f"  Loss weights saved to: data/processed/splits/class_weights.csv")
-
-    print(f"\n[build_splits] Done.")
-    print(f"  Classes ({len(classes)}): {classes}")
-    print(f"  Train: {len(train_df):,}  |  Val: {len(val_df):,}  |  Test: {len(test_df):,}")
-    print(f"  Total unique files indexed: {len(df_all):,}")
+    pd.DataFrame(classes, columns=["label", "label_idx"]).to_csv(SPLITS_DIR / "classes.csv", index=False)
+    pd.DataFrame(train_rows).to_csv(SPLITS_DIR / "train.csv", index=False)
+    pd.DataFrame(val_rows).to_csv(SPLITS_DIR / "val.csv", index=False)
+    pd.DataFrame(test_rows).to_csv(SPLITS_DIR / "test.csv", index=False)
+    print("[build_splits] Done.")
+    print("  Classes:", len(classes), ", ".join([c for c, _ in classes]))
+    print("  Train:", len(train_rows), "Val:", len(val_rows), "Test:", len(test_rows))
 
 
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description="Retro Game Classifier — Dataset Builder")
-    parser.add_argument("--mode", choices=["frames", "audio", "spectrograms",
-                                           "splits", "all"], default="all")
-    parser.add_argument("--fps",           type=float, default=1.0)
-    parser.add_argument("--clip_duration", type=float, default=10.0)
-    parser.add_argument("--val_ratio",     type=float, default=0.15)
-    parser.add_argument("--test_ratio",    type=float, default=0.15)
-    parser.add_argument(
-        "--max_per_class", type=int, default=0,
-        help="Cap each class at this many samples (0 = no cap). "
-             "Recommended: set to ~2x your smallest class size to reduce imbalance."
-    )
-    args = parser.parse_args()
-
-    mode = args.mode
-    if mode in ("frames",       "all"): extract_frames(fps=args.fps)
-    if mode in ("audio",        "all"): extract_audio(clip_duration=args.clip_duration)
-    if mode in ("spectrograms", "all"): generate_spectrograms()
-    if mode in ("splits",       "all"):
-        build_splits(
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            max_per_class=args.max_per_class,
-        )
-
-
-if __name__ == "__main__":
-    main()
+def parse_args():
+    ap = argparse.ArgumentParser(description="Retro Game Classifier — Dataset Builder")
+    ap.add_argument("--mode", default="all", choices=["frames", "audio", "spectrograms", "splits", "all"])
+    ap.add_argument("--fps", type=float, default=0.3)
+    ap.add_argument("--clip_duration", type=float, default=3.0)
+    ap.add_argument("--val_ratio", type=float, default=0.15)
+    ap.add_argument("--test_ratio", type=float, default=0.15)
+    ap.add_argument("--max_per_class", type=int, default=0,
+                    help="Cap each class at this many samples (0 = no cap). Recommended: set to ~2x your smallest class size to reduce imbalance.")
+    ap.add_argument("--classes", nargs="+", default=None,
+                    help="Optional subset of class folders to process, e.g. --classes SMB2 SMB3")
+    ap.add_argument("--target_frames_per_class", type=int, default=None,
+                    help="If set for --mode frames, compute fps per class from total runtime to target this many frames across the class")
+    return ap.parse_args()
