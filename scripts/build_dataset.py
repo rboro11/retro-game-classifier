@@ -376,16 +376,21 @@ def main():
     ensure_dirs()
 
     if args.mode in ["frames", "all"]:
-        if args.classes and args.target_frames_per_class:
-            for cls in args.classes:
+        if args.target_frames_per_class:
+            class_names = args.classes
+            if class_names is None:
+                class_names = sorted([p.name for p in RAW_DIR.iterdir() if p.is_dir()])
+
+            for cls in class_names:
                 class_dir = RAW_DIR / cls
                 fps = compute_runtime_scaled_fps(class_dir, args.target_frames_per_class)
                 if fps is None:
                     fps = args.fps
                     print(f"[frames] {cls}: could not compute runtime-scaled fps, falling back to --fps {fps}")
+                    extract_frames(fps=fps, classes=[cls], runtime_scaled=False, target_frames_per_class=None)
                 else:
                     print(f"[frames] {cls}: runtime-scaled fps = {fps:.6f} for target {args.target_frames_per_class}")
-                extract_frames(fps=fps, classes=[cls], runtime_scaled=True, target_frames_per_class=args.target_frames_per_class)
+                    extract_frames(fps=fps, classes=[cls], runtime_scaled=True, target_frames_per_class=args.target_frames_per_class)
         else:
             extract_frames(fps=args.fps, classes=args.classes)
 
