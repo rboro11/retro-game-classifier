@@ -183,8 +183,11 @@ def _ffmpeg_hwaccel_args() -> list:
     return []
 
 
-def extract_frames(fps: float = 1.0, classes: list[str] | None = None):
-    print(f"\n[extract_frames] FPS = {fps}  (images skipped — referenced directly from raw/)")
+def extract_frames(fps: float = 1.0, classes: list[str] | None = None, runtime_scaled: bool = False, target_frames_per_class: int | None = None):
+    if runtime_scaled:
+        print(f"\n[extract_frames] Runtime-scaled extraction enabled (target_frames_per_class={target_frames_per_class}; images skipped — referenced directly from raw/)")
+    else:
+        print(f"\n[extract_frames] Fixed FPS = {fps}  (images skipped — referenced directly from raw/)")
     hw_args = _ffmpeg_hwaccel_args()
 
     if not RAW_DIR.exists():
@@ -382,7 +385,7 @@ def main():
                     print(f"[frames] {cls}: could not compute runtime-scaled fps, falling back to --fps {fps}")
                 else:
                     print(f"[frames] {cls}: runtime-scaled fps = {fps:.6f} for target {args.target_frames_per_class}")
-                extract_frames(fps=fps, classes=[cls])
+                extract_frames(fps=fps, classes=[cls], runtime_scaled=True, target_frames_per_class=args.target_frames_per_class)
         else:
             extract_frames(fps=args.fps, classes=args.classes)
 
