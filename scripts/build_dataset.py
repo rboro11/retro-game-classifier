@@ -345,6 +345,46 @@ def build_splits(val_ratio=0.15, test_ratio=0.15, max_per_class=0, seed=42):
             for p in xs:
                 rows.append({"filepath": str(p), "label": cls, "label_idx": label_idx, "split": split_name, "modality": "image"})
 
+    def rebalance_rows(rows, seed=42):
+        if not rows:
+            return rows
+        by_label = {}
+        for r in rows:
+            by_label.setdefault(r["label"], []).append(r)
+        target = min(len(v) for v in by_label.values())
+        rng = random.Random(seed)
+        balanced = []
+        for label in sorted(by_label):
+            items = by_label[label][:]
+            rng.shuffle(items)
+            balanced.extend(items[:target])
+        rng.shuffle(balanced)
+        return balanced
+
+    train_rows = rebalance_rows(train_rows, seed=seed)
+    val_rows = rebalance_rows(val_rows, seed=seed + 1)
+    test_rows = rebalance_rows(test_rows, seed=seed + 2)
+
+    def rebalance_rows(rows, seed=42):
+        if not rows:
+            return rows
+        by_label = {}
+        for r in rows:
+            by_label.setdefault(r["label"], []).append(r)
+        target = min(len(v) for v in by_label.values())
+        rng = random.Random(seed)
+        balanced = []
+        for label in sorted(by_label):
+            items = by_label[label][:]
+            rng.shuffle(items)
+            balanced.extend(items[:target])
+        rng.shuffle(balanced)
+        return balanced
+
+    train_rows = rebalance_rows(train_rows, seed=seed)
+    val_rows = rebalance_rows(val_rows, seed=seed + 1)
+    test_rows = rebalance_rows(test_rows, seed=seed + 2)
+
     SPLITS_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(classes, columns=["label", "label_idx"]).to_csv(SPLITS_DIR / "classes.csv", index=False)
     pd.DataFrame(train_rows).to_csv(SPLITS_DIR / "train.csv", index=False)
