@@ -343,7 +343,7 @@ def build_splits(val_ratio=0.15, test_ratio=0.15, max_per_class=0, seed=42):
 
         for split_name, rows, xs in [("train", train_rows, train), ("val", val_rows, val), ("test", test_rows, test)]:
             for p in xs:
-                rows.append({"filepath": str(p), "label": cls, "label_idx": label_idx, "split": split_name})
+                rows.append({"filepath": str(p), "label": cls, "label_idx": label_idx, "split": split_name, "modality": "image"})
 
     SPLITS_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(classes, columns=["label", "label_idx"]).to_csv(SPLITS_DIR / "classes.csv", index=False)
